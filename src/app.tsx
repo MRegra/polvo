@@ -309,7 +309,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 function StatusBar(): React.ReactElement {
   return (
     <Box flexShrink={0} paddingX={1} paddingY={0}>
-      <Text color="gray" dimColor>
+      <Text color="white" dimColor>
         {process.cwd()} · context: 200k
       </Text>
     </Box>
