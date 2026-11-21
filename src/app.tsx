@@ -270,7 +270,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.14 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.15 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -462,29 +462,33 @@ export function App({ provider, warning }: Props): React.ReactElement {
         ))}
       </Box>
 
-      <Box
-        flexShrink={0}
-        borderStyle="round"
-        borderColor={pending ? 'yellow' : busy ? 'gray' : 'cyan'}
-        paddingX={1}
-      >
-        {pending ? (
+      {pending ? (
+        <Box flexShrink={0} borderStyle="round" borderColor="yellow" paddingX={1}>
           <ApprovalPrompt pending={pending} />
-        ) : busy ? (
+        </Box>
+      ) : busy ? (
+        <Box flexShrink={0} paddingX={1}>
           <Text color="cyanBright">
             <Spinner type="dots" /> thinking…
           </Text>
-        ) : (
-          <Box>
-            <Text color="cyan">❯ </Text>
-            <TextInput
-              value={input}
-              onChange={(v) => setInput(v.replace(/[\r\n]+/g, ' '))}
-              onSubmit={onSubmit}
-              placeholder="type a message · /exit to quit"
-            />
-          </Box>
-        )}
+        </Box>
+      ) : null}
+
+      <Box
+        flexShrink={0}
+        borderStyle="round"
+        borderColor="cyan"
+        paddingX={1}
+      >
+        <Box>
+          <Text color="cyan">❯ </Text>
+          <TextInput
+            value={input}
+            onChange={(v) => setInput(v.replace(/[\r\n]+/g, ' '))}
+            onSubmit={onSubmit}
+            placeholder="type a message · /exit to quit"
+          />
+        </Box>
       </Box>
 
       <StatusBar tokenCount={contextTokenCount} maxTokens={CONTEXT_WINDOW_TOKENS} />
