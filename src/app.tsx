@@ -9,6 +9,7 @@ type Role = 'header' | 'system' | 'user' | 'assistant';
 interface Turn {
   role: Role;
   content: string;
+  streaming?: boolean; // an assistant turn still being written
 }
 
 interface Props {
@@ -20,7 +21,11 @@ interface Props {
  * The whole polvo UI. The app fills the full terminal height: the conversation
  * is bottom-aligned in a flexible area (newest turns sit just above the input;
  * older ones scroll off the top), and the input box is pinned to the bottom.
- * No tools yet — on submit we just stream the model's reply.
+ *
+ * All displayed turns live in one `turns` list — the in-progress reply is just
+ * the last turn with `streaming: true`, mutated in place — so a reply never
+ * renders twice. `history` is the parallel message list sent to the model.
+ * No tools yet: on submit we stream one reply.
  */
 export function App({ provider, warning }: Props): React.ReactElement {
   const { exit } = useApp();
@@ -43,21 +48,25 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: `🐙 polvo v0.1.1 · model: ${provider.model}` },
+      { role: 'header', content: `🐙 polvo v0.1.2 · model: ${provider.model}` },
     ];
     if (warning) seed.push({ role: 'system', content: warning });
     return seed;
   });
-  const [streaming, setStreaming] = useState<string | null>(null);
   const [input, setInput] = useState('');
-  const busy = streaming !== null;
+  const [busy, setBusy] = useState(false);
 
-  // The real conversation sent to the model (user/assistant only — never the
-  // header or system notices shown above).
+  // Authoritative re-entrancy guard: a stale key event (or a future tool-loop
+  // step) must not start a second turn while one is running. State alone isn't
+  // enough on Ink 5's legacy React root.
+  const busyRef = useRef(false);
+
+  // The real conversation sent to the model (user/assistant only).
   const history = useRef<Message[]>([]);
 
   const onSubmit = useCallback(
     async (raw: string): Promise<void> => {
+      if (busyRef.current) return;
       const text = raw.trim();
       setInput('');
       if (text === '') return;
@@ -66,30 +75,51 @@ export function App({ provider, warning }: Props): React.ReactElement {
         return;
       }
 
-      setTurns((prev) => [...prev, { role: 'user', content: text }]);
-      history.current.push({ role: 'user', content: text });
-      setStreaming('');
+      busyRef.current = true;
+      setBusy(true);
+      setTurns((prev) => [
+        ...prev,
+        { role: 'user', content: text },
+        { role: 'assistant', content: '', streaming: true },
+      ]);
+      history.current = [...history.current, { role: 'user', content: text }];
 
       try {
-        const reply = await provider.stream(history.current, (delta) => {
-          setStreaming((s) => (s ?? '') + delta);
+        const reply = await provider.stream([...history.current], (delta) => {
+          setTurns((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1]!;
+            next[next.length - 1] = { ...last, content: last.content + delta };
+            return next;
+          });
         });
+
         if (reply.trim() === '') {
-          history.current.pop(); // drop the unanswered user turn
+          history.current = history.current.slice(0, -1); // drop unanswered user turn
           setTurns((prev) => [
-            ...prev,
+            ...prev.slice(0, -1), // remove the empty streaming turn
             { role: 'system', content: '(empty reply)' },
           ]);
         } else {
-          history.current.push({ role: 'assistant', content: reply });
-          setTurns((prev) => [...prev, { role: 'assistant', content: reply }]);
+          history.current = [
+            ...history.current,
+            { role: 'assistant', content: reply },
+          ];
+          setTurns((prev) => [
+            ...prev.slice(0, -1),
+            { role: 'assistant', content: reply },
+          ]);
         }
       } catch (err) {
-        history.current.pop();
+        history.current = history.current.slice(0, -1);
         const msg = err instanceof Error ? err.message : String(err);
-        setTurns((prev) => [...prev, { role: 'system', content: `⚠ ${msg}` }]);
+        setTurns((prev) => [
+          ...prev.slice(0, -1),
+          { role: 'system', content: `⚠ ${msg}` },
+        ]);
       } finally {
-        setStreaming(null);
+        busyRef.current = false;
+        setBusy(false);
       }
     },
     [provider, exit],
@@ -106,9 +136,6 @@ export function App({ provider, warning }: Props): React.ReactElement {
         {turns.map((turn, index) => (
           <TurnView key={index} turn={turn} />
         ))}
-        {streaming !== null && (
-          <TurnView turn={{ role: 'assistant', content: streaming || '…' }} />
-        )}
       </Box>
 
       <Box
@@ -127,7 +154,9 @@ export function App({ provider, warning }: Props): React.ReactElement {
             <Text color="cyan">❯ </Text>
             <TextInput
               value={input}
-              onChange={setInput}
+              // Flatten pasted newlines/CR so a multi-line paste can't corrupt
+              // the single-line box (proper multi-line input comes later).
+              onChange={(v) => setInput(v.replace(/[\r\n]+/g, ' '))}
               onSubmit={onSubmit}
               placeholder="type a message · /exit to quit"
             />
@@ -156,12 +185,13 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
     );
   }
   const isUser = turn.role === 'user';
+  const body = turn.content !== '' ? turn.content : turn.streaming ? '…' : '';
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={isUser ? 'cyan' : 'green'} bold>
         {isUser ? 'you' : '🐙 polvo'}
       </Text>
-      <Text>{turn.content}</Text>
+      <Text>{body}</Text>
     </Box>
   );
 }

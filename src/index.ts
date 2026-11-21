@@ -6,7 +6,7 @@ import { loadConfig } from './config.js';
 import { OllamaProvider, checkOllama } from './provider.js';
 import { App } from './app.js';
 
-const USAGE = `polvo — a terminal coding agent (v0.1.1)
+const USAGE = `polvo — a terminal coding agent (v0.1.2)
 
 usage: polvo [options]
 
@@ -46,8 +46,16 @@ if (values.help) {
   process.exit(0);
 }
 if (values.version) {
-  console.log('polvo 0.1.1');
+  console.log('polvo 0.1.2');
   process.exit(0);
+}
+
+// The TUI needs a real terminal; a pipe (echo … | polvo) can't run raw mode.
+if (!process.stdin.isTTY) {
+  console.error(
+    'polvo needs an interactive terminal (a TTY) — run it directly, not piped.',
+  );
+  process.exit(1);
 }
 
 const config = loadConfig(values.model);
@@ -56,3 +64,4 @@ const provider = new OllamaProvider(config.model, config.system);
 
 const app = render(createElement(App, { provider, warning }));
 await app.waitUntilExit();
+process.exit(0); // don't linger if a request is still open (e.g. Ctrl-C mid-reply)

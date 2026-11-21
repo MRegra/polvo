@@ -66,7 +66,10 @@ export async function checkOllama(
   host: string = DEFAULT_HOST,
 ): Promise<string | null> {
   try {
-    const res = await fetch(new URL('/api/tags', host));
+    const baseUrl = (
+      /^https?:\/\//.test(host) ? host : `http://${host}`
+    ).replace(/\/$/, '');
+    const res = await fetch(`${baseUrl}/api/tags`);
     if (!res.ok) return `Ollama at ${host} responded ${res.status}`;
     const data = (await res.json()) as { models?: Array<{ name: string }> };
     const names = (data.models ?? []).map((m) => m.name);
