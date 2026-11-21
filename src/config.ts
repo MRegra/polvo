@@ -11,6 +11,6 @@ instead of pretending to have it.`;
 
 /** Resolve runtime config. Precedence: CLI flag > env > built-in default. */
 export function loadConfig(cliModel?: string): Config {
-  const model = cliModel ?? process.env.POLVO_MODEL ?? 'claude-opus-5-5';
+  const model = cliModel ?? process.env.POLVO_MODEL ?? 'qwen3-coder:30b';
   return { model, system: SYSTEM_PROMPT };
 }

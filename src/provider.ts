@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { Ollama } from 'ollama';
 
 export interface Message {
   role: 'user' | 'assistant';
@@ -7,8 +7,8 @@ export interface Message {
 
 /**
  * A model backend. Everything the agent needs from an LLM goes through this
- * interface, so swapping Anthropic for a local model later is a new class —
- * not a rewrite of the REPL.
+ * interface, so swapping the local model for a different one — or a remote API
+ * later — is a new class, not a rewrite of the REPL.
  */
 export interface Provider {
   readonly name: string;
@@ -20,38 +20,62 @@ export interface Provider {
   stream(messages: Message[], onText: (delta: string) => void): Promise<string>;
 }
 
-export class AnthropicProvider implements Provider {
-  readonly name = 'anthropic';
-  private client: Anthropic | undefined;
+const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
+
+export class OllamaProvider implements Provider {
+  readonly name = 'ollama';
+  private readonly client: Ollama;
 
   constructor(
     readonly model: string,
     private readonly system: string,
-  ) {}
-
-  // Lazy so construction never throws when no credentials are present;
-  // the auth error then surfaces on the first request, where it is caught.
-  private getClient(): Anthropic {
-    return (this.client ??= new Anthropic());
+    host: string = DEFAULT_HOST,
+  ) {
+    this.client = new Ollama({ host });
   }
 
   async stream(
     messages: Message[],
     onText: (delta: string) => void,
   ): Promise<string> {
-    const stream = this.getClient().messages.stream({
+    const response = await this.client.chat({
       model: this.model,
-      max_tokens: 8192,
-      system: this.system,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      stream: true,
+      messages: [{ role: 'system', content: this.system }, ...messages],
     });
 
-    stream.on('text', (delta) => onText(delta));
+    let full = '';
+    for await (const part of response) {
+      const delta = part.message?.content ?? '';
+      if (delta) {
+        full += delta;
+        onText(delta);
+      }
+    }
+    return full;
+  }
+}
 
-    const final = await stream.finalMessage();
-    return final.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
+/**
+ * Preflight: is Ollama reachable, and is the model present? Returns a
+ * human-readable warning, or null when all is well. Never throws — a startup
+ * hint must not block the program.
+ */
+export async function checkOllama(
+  model: string,
+  host: string = DEFAULT_HOST,
+): Promise<string | null> {
+  try {
+    const res = await fetch(new URL('/api/tags', host));
+    if (!res.ok) return `Ollama at ${host} responded ${res.status}`;
+    const data = (await res.json()) as { models?: Array<{ name: string }> };
+    const names = (data.models ?? []).map((m) => m.name);
+    const base = (s: string): string => s.split(':')[0] ?? s;
+    if (!names.some((n) => n === model || base(n) === base(model))) {
+      return `model "${model}" is not pulled — run:  ollama pull ${model}`;
+    }
+    return null;
+  } catch {
+    return `can't reach Ollama at ${host} — is it running?  (try: ollama serve)`;
   }
 }
