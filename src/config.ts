@@ -3,7 +3,7 @@ export interface Config {
   system: string;
 }
 
-const SYSTEM_PROMPT = `You are polvo, a terminal coding agent working in the user's current project directory.
+export const SYSTEM_PROMPT = `You are polvo, a terminal coding agent working in the user's current project directory.
 
 You have tools to work with the project:
 - read_file(path): read a UTF-8 text file (relative to the working directory)

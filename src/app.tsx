@@ -6,6 +6,7 @@ import type { AgentEvents } from './agent.js';
 import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
+import { SYSTEM_PROMPT } from './config.js';
 
 type Role =
   | 'header'
@@ -269,7 +270,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.12 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.13 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -285,14 +286,18 @@ export function App({ provider, warning }: Props): React.ReactElement {
   const pendingSinceRef = useRef(0); // when the current prompt appeared (type-ahead guard)
   const history = useRef<Message[]>([]); // user/assistant/tool messages for the model
 
-  // Calculate token count from turns (displayed messages)
-  const displayedTokenCount = useMemo((): number => {
-    let count = 0;
-    for (const turn of turns) {
-      count += estimateTokens(turn.content);
+  // Calculate token count from turns + system prompt
+  // This estimates the actual context window sent to the model
+  const [contextTokenCount, setContextTokenCount] = useState(0);
+  
+  // Update token count when turns or history changes
+  useEffect(() => {
+    let count = estimateTokens(SYSTEM_PROMPT);
+    for (const msg of history.current) {
+      count += estimateTokens(msg.content);
     }
-    return count;
-  }, [turns]);
+    setContextTokenCount(count);
+  }, [turns, history.current.length]);
 
   const resolvePending = useCallback((approved: boolean): void => {
     const resolve = resolvePendingRef.current;
@@ -486,7 +491,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
         )}
       </Box>
 
-      <StatusBar tokenCount={displayedTokenCount} maxTokens={CONTEXT_WINDOW_TOKENS} />
+      <StatusBar tokenCount={contextTokenCount} maxTokens={CONTEXT_WINDOW_TOKENS} />
     </Box>
   );
 }
@@ -506,7 +511,7 @@ function StatusBar({ tokenCount, maxTokens }: StatusBarProps): React.ReactElemen
       <Box flexDirection="row" justifyContent="space-between" width="100%">
         <Text color="white" dimColor>{process.cwd()}</Text>
         <Text color={percentage > 80 ? 'yellow' : percentage > 60 ? 'cyan' : 'white'}> 
-          {tokenCount}/{maxTokens} ({tokenK}k/{maxK}k)
+          context: {tokenCount}/{maxTokens} ({tokenK}k/{maxK}k)
         </Text>
       </Box>
     </Box>
