@@ -6,7 +6,7 @@ import { loadConfig } from './config.js';
 import { OllamaProvider, checkOllama } from './provider.js';
 import { App } from './app.js';
 
-const USAGE = `polvo — a terminal coding agent (v0.3.13)
+const USAGE = `polvo — a terminal coding agent (v0.3.14)
 
 usage: polvo [options]
 
@@ -46,7 +46,7 @@ if (values.help) {
   process.exit(0);
 }
 if (values.version) {
-  console.log('polvo 0.3.13');
+  console.log('polvo 0.3.14');
   process.exit(0);
 }
 
