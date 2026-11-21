@@ -1,6 +1,6 @@
 {
   "name": "polvo",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "A terminal coding agent, built in small readable increments.",
   "type": "module",
   "bin": {
@@ -18,10 +18,16 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "@types/react": "^18.3.31",
+    "ink-testing-library": "^4.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "ollama": "^0.6.4"
+    "ink": "^5.2.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "ollama": "^0.6.4",
+    "react": "^18.3.1"
   }
 }

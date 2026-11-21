@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { createElement } from 'react';
+import { render } from 'ink';
 import { loadConfig } from './config.js';
 import { OllamaProvider, checkOllama } from './provider.js';
-import { runRepl } from './repl.js';
-import * as ui from './ui.js';
+import { App } from './app.js';
 
-const USAGE = `polvo — a terminal coding agent (v0.0.1)
+const USAGE = `polvo — a terminal coding agent (v0.1.0)
 
 usage: polvo [options]
 
@@ -17,10 +18,9 @@ options:
 env:
   POLVO_MODEL        default model id
   OLLAMA_HOST        Ollama server (default: http://127.0.0.1:11434)
-  NO_COLOR           disable colored output
 
 while running:
-  /exit, /quit       leave`;
+  /exit, /quit       leave   ·   Ctrl-C also quits`;
 
 // A bad flag (unknown option, stray positional, bare -m) throws from parseArgs;
 // turn that into a clean usage message instead of a raw Node stack trace.
@@ -35,29 +35,24 @@ function parse(): { model?: string; help?: boolean; version?: boolean } {
     }).values;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(ui.errorLine(msg) + '\n\n' + USAGE + '\n');
+    console.error(msg + '\n\n' + USAGE);
     process.exit(2);
   }
 }
 
 const values = parse();
-
 if (values.help) {
   console.log(USAGE);
   process.exit(0);
 }
 if (values.version) {
-  console.log('polvo 0.0.1');
+  console.log('polvo 0.1.0');
   process.exit(0);
 }
 
 const config = loadConfig(values.model);
-
-// Diagnostics go to stderr so stdout stays clean (pipeable, no interleave).
 const warning = await checkOllama(config.model);
-if (warning) {
-  process.stderr.write(ui.errorLine(warning) + '\n\n');
-}
-
 const provider = new OllamaProvider(config.model, config.system);
-await runRepl(provider);
+
+const app = render(createElement(App, { provider, warning }));
+await app.waitUntilExit();
