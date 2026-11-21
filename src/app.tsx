@@ -5,6 +5,7 @@ import Spinner from 'ink-spinner';
 import type { AgentEvents } from './agent.js';
 import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
+import { normalize } from 'node:path';
 
 type Role =
   | 'header'
@@ -41,6 +42,35 @@ function summarize(result: string): string {
   return `→ ${lines} line${lines === 1 ? '' : 's'}, ${result.length} chars`;
 }
 
+// Strip control characters (incl. ESC) so a model-supplied path or file preview
+// can't use ANSI escapes to conceal or spoof what the approval prompt shows.
+function sanitize(s: string): string {
+  // control chars (incl. ESC), Unicode format/bidi chars (RTL override,
+  // zero-width), and line/paragraph separators — all can conceal or reorder.
+  return s.replace(/[\p{Cc}\p{Cf}  ]/gu, '');
+}
+
+// After an abort or error, keep every COMPLETED step (tool side effects really
+// happened and the model should remember them) but drop a trailing assistant
+// whose tool calls were left unanswered, so the next request stays valid.
+function dropIncompleteTail(history: Message[]): void {
+  let i = history.length - 1;
+  let toolResults = 0;
+  while (i >= 0 && history[i]?.role === 'tool') {
+    toolResults++;
+    i--;
+  }
+  const last = history[i];
+  if (
+    last &&
+    last.role === 'assistant' &&
+    last.tool_calls &&
+    last.tool_calls.length > toolResults
+  ) {
+    history.length = i;
+  }
+}
+
 /**
  * The whole polvo UI. The app fills the terminal height: the conversation is
  * bottom-aligned (newest turns above the input, older scroll off the top) and
@@ -55,7 +85,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: `🐙 polvo v0.3.0 · model: ${provider.model}` },
+      { role: 'header', content: `🐙 polvo v0.3.1 · model: ${provider.model}` },
     ];
     if (warning) seed.push({ role: 'system', content: warning });
     return seed;
@@ -67,6 +97,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
   const busyRef = useRef(false); // authoritative re-entrancy guard
   const abortRef = useRef<AbortController | null>(null);
   const resolvePendingRef = useRef<((approved: boolean) => void) | null>(null);
+  const pendingSinceRef = useRef(0); // when the current prompt appeared (type-ahead guard)
   const history = useRef<Message[]>([]); // user/assistant/tool messages for the model
 
   const resolvePending = useCallback((approved: boolean): void => {
@@ -81,6 +112,11 @@ export function App({ provider, warning }: Props): React.ReactElement {
   useInput(
     (inputChar, key) => {
       if (resolvePendingRef.current) {
+        // Ignore buffered type-ahead for a beat so a keystroke meant for the
+        // previous input can't blind-answer a prompt the user hasn't seen yet,
+        // and ignore modified keys (Ctrl/Alt+Y arrive as a bare 'y').
+        if (Date.now() - pendingSinceRef.current < 350) return;
+        if (key.ctrl || key.meta) return;
         const ch = inputChar.toLowerCase();
         if (ch === 'y') resolvePending(true);
         else if (ch === 'n') resolvePending(false);
@@ -140,6 +176,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
       args: Record<string, unknown>;
     }): Promise<boolean> =>
       new Promise<boolean>((resolve) => {
+        pendingSinceRef.current = Date.now();
         setPending({ tool: req.tool, args: req.args });
         resolvePendingRef.current = resolve;
       }),
@@ -163,7 +200,6 @@ export function App({ provider, warning }: Props): React.ReactElement {
       abortRef.current = controller;
 
       setTurns((prev) => [...prev, { role: 'user', content: text }]);
-      const mark = history.current.length; // roll back to here on cancel/failure
       history.current.push({ role: 'user', content: text });
 
       const events: AgentEvents = {
@@ -192,12 +228,12 @@ export function App({ provider, warning }: Props): React.ReactElement {
         await runAgent(provider, history.current, events, controller.signal);
         finalizeAssistant();
         if (controller.signal.aborted) {
-          history.current = history.current.slice(0, mark);
+          dropIncompleteTail(history.current);
           setTurns((prev) => [...prev, { role: 'system', content: '[cancelled]' }]);
         }
       } catch (err) {
         finalizeAssistant();
-        history.current = history.current.slice(0, mark); // keep history valid
+        dropIncompleteTail(history.current); // stay valid, keep completed writes
         const msg = err instanceof Error ? err.message : String(err);
         setTurns((prev) => [...prev, { role: 'system', content: `⚠ ${msg}` }]);
       } finally {
@@ -258,11 +294,14 @@ function ApprovalPrompt({
 }: {
   pending: PendingApproval;
 }): React.ReactElement {
-  const path = typeof pending.args.path === 'string' ? pending.args.path : '?';
+  const rawPath = typeof pending.args.path === 'string' ? pending.args.path : '?';
+  const path = sanitize(normalize(rawPath)); // the resolved, un-spoofable path
   const content =
     typeof pending.args.content === 'string' ? pending.args.content : '';
   const lines = content.split('\n');
-  const preview = lines.slice(0, 8);
+  const preview = lines
+    .slice(0, 8)
+    .map((line) => sanitize(line.slice(0, 500)).slice(0, 200));
   return (
     <Box flexDirection="column">
       <Text color="yellowBright" bold>
@@ -287,7 +326,9 @@ function ApprovalPrompt({
           ) : null}
         </Box>
       ) : (
-        <Text color="gray">{JSON.stringify(pending.args)}</Text>
+        <Text color="gray">
+          {sanitize(JSON.stringify(pending.args)).slice(0, 300)}
+        </Text>
       )}
       <Text>
         apply?{' '}

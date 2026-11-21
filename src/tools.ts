@@ -1,4 +1,13 @@
-import { open, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  open,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import {
   basename,
   dirname,
@@ -16,15 +25,19 @@ export interface Tool {
   run(args: Record<string, unknown>): Promise<string>;
 }
 
+const MAX_BYTES = 48_000;
+const TRUNCATION_MARKER = `…[truncated at ${MAX_BYTES} bytes]`;
+
 /**
  * Resolve a model-supplied path against the working directory and refuse
  * anything that escapes it — including via a symlink, by resolving the REAL
  * (link-followed) path and comparing it to the real working directory. The
- * returned value is the resolved real path, safe to stat/open/write.
+ * returned value is the resolved real path, safe to stat/open.
  *
  * With `mustExist: false` (writing a new file) the target itself may not exist,
  * so its nearest existing ancestor is resolved instead and the boundary is
- * checked against that — a symlinked parent still can't smuggle a write outside.
+ * checked against that. A broken/dangling symlink is refused outright: its
+ * target is missing so it looks "absent", but following it would escape.
  */
 async function resolveWithin(
   input: unknown,
@@ -33,13 +46,24 @@ async function resolveWithin(
   if (typeof input !== 'string' || input.trim() === '') {
     throw new Error('expected a non-empty "path" string');
   }
+  if (/[\p{Cc}\p{Cf}]/u.test(input)) {
+    // control chars AND Unicode format/bidi chars (RTL override, zero-width) —
+    // both can spoof the approval prompt or hide the true target.
+    throw new Error('path contains control characters');
+  }
   const root = await realpath(process.cwd());
   const abs = resolve(root, input);
   let real: string;
   try {
     real = await realpath(abs);
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     if (mustExist) throw new Error(`cannot access path: ${input}`);
+    // realpath failed with ENOENT: either truly absent, or a dangling symlink
+    // (the link exists but its target doesn't). lstat tells them apart; refuse
+    // the dangling link, since writing would follow it outside the cwd.
+    const link = await lstat(abs).catch(() => null);
+    if (link) throw new Error(`refusing to follow a broken symlink: ${input}`);
     let realParent: string;
     try {
       realParent = await realpath(dirname(abs));
@@ -57,8 +81,6 @@ async function resolveWithin(
   }
   return real;
 }
-
-const MAX_BYTES = 48_000;
 
 const readFileTool: Tool = {
   schema: {
@@ -90,7 +112,7 @@ const readFileTool: Tool = {
       const { bytesRead } = await fh.read(buf, 0, MAX_BYTES, 0);
       let text = buf.toString('utf8', 0, bytesRead);
       if (info.size > MAX_BYTES) {
-        text += `\n…[truncated at ${MAX_BYTES} bytes]`;
+        text += `\n${TRUNCATION_MARKER}`;
       }
       return text;
     } finally {
@@ -158,15 +180,43 @@ const writeFileTool: Tool = {
     if (typeof args.content !== 'string') {
       throw new Error('expected a "content" string');
     }
+    if (args.content.includes(TRUNCATION_MARKER)) {
+      throw new Error(
+        'content still holds a read_file truncation marker — the file was only read in part; refusing to write it back and lose the rest',
+      );
+    }
     const abs = await resolveWithin(args.path, false);
-    const info = await stat(abs).catch((err: NodeJS.ErrnoException) => {
+    const root = await realpath(process.cwd());
+    if (
+      relative(root, abs)
+        .split(sep)
+        .some((s) => s.toLowerCase() === '.git')
+    ) {
+      throw new Error('refusing to write inside a .git directory');
+    }
+    const info = await lstat(abs).catch((err: NodeJS.ErrnoException) => {
       if (err.code === 'ENOENT') return null;
       throw err;
     });
-    if (info && !info.isFile()) {
-      throw new Error('refusing to overwrite a non-regular file');
+    if (info) {
+      if (info.isSymbolicLink()) {
+        throw new Error('refusing to write through a symlink');
+      }
+      if (!info.isFile()) {
+        throw new Error('refusing to overwrite a non-regular file');
+      }
     }
-    await writeFile(abs, args.content, 'utf8');
+    // Atomic write: write a temp file in the same directory, then rename over
+    // the target. rename doesn't follow a symlink and doesn't touch a hardlink's
+    // other names, and it never leaves a half-written file on crash/ENOSPC.
+    const tmpPath = join(dirname(abs), `.polvo-tmp-${process.pid}-${Date.now()}`);
+    await writeFile(tmpPath, args.content, 'utf8');
+    try {
+      await rename(tmpPath, abs);
+    } catch (err) {
+      await rm(tmpPath, { force: true });
+      throw err;
+    }
     const lines = args.content.split('\n').length;
     const path = typeof args.path === 'string' ? args.path : '';
     return `wrote ${args.content.length} chars (${lines} line${lines === 1 ? '' : 's'}) to ${path}`;

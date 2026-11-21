@@ -47,7 +47,7 @@ export async function runAgent(
 
     for (const call of toolCalls) {
       events.onToolCall(call.name, call.args);
-      const tool = TOOLS[call.name];
+      const tool = Object.hasOwn(TOOLS, call.name) ? TOOLS[call.name] : undefined;
       let result: string;
       let isError = false;
       if (!tool) {
