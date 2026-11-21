@@ -394,7 +394,7 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
       );
     case 'tool-call':
       return (
-        <Box>
+        <Box marginBottom={1}>
           <Text color="blueBright">🔧 {sanitizeText(turn.content)}</Text>
         </Box>
       );
