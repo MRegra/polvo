@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdin } from 'ink';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
@@ -64,6 +64,82 @@ function sanitizeText(s: string): string {
     .replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, '');
 }
 
+// Estimate token count from text. Uses a simple approximation:
+// ~4 characters per token for English text. This is not precise but
+// sufficient for UI display. For accurate counting, use a proper tokenizer.
+function estimateTokens(text: string): number {
+  // Remove whitespace for counting (tokens include words + punctuation)
+  const trimmed = text.trim();
+  // Approximation: ~4 chars per token
+  return Math.floor(trimmed.length / 4);
+}
+
+// Context window configuration
+const CONTEXT_WINDOW_TOKENS = 200_000;
+
+// Context window management: tracks current usage and provides compaction
+// Best practices:
+// 1. Count tokens accurately (approximation for now)
+// 2. Trim from the oldest messages when approaching limit
+// 3. Keep system/header messages (they're small and important)
+// 4. Preserve recent conversation flow
+// 5. Never drop the most recent user message (context for next reply)
+// Helper to estimate total tokens in history
+function estimateHistoryTokens(history: Message[]): number {
+  let total = 0;
+  for (const msg of history) {
+    total += estimateTokens(msg.content);
+  }
+  return total;
+}
+
+function compactHistory(history: Message[], maxTokens: number = CONTEXT_WINDOW_TOKENS): Message[] {
+  // Count tokens in current history
+  let totalTokens = 0;
+  for (const msg of history) {
+    totalTokens += estimateTokens(msg.content);
+  }
+
+  // If under limit, no compaction needed
+  if (totalTokens <= maxTokens) {
+    return history;
+  }
+
+  // Compaction strategy: remove oldest non-system messages first
+  // Keep: system messages, header, and recent messages
+  const result: Message[] = [];
+  let currentTokens = 0;
+
+  // Traverse from newest to oldest, keeping what fits
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    const msgTokens = estimateTokens(msg.content);
+
+    // Always keep system messages (they're small and important)
+    if (msg.role === 'system') {
+      result.unshift(msg);
+      currentTokens += msgTokens;
+      continue;
+    }
+
+    // Check if adding this message would exceed the limit
+    if (currentTokens + msgTokens <= maxTokens) {
+      result.unshift(msg);
+      currentTokens += msgTokens;
+    } else {
+      // Skip this message (it's too old to fit)
+      // But ensure we keep at least the last user message for context
+      if (msg.role === 'user' && result.length > 0 && result[0].role !== 'user') {
+        // This is the oldest user message we're dropping; 
+        // consider summarizing it instead
+        // For now, just drop it - future improvement: add summary
+      }
+    }
+  }
+
+  return result;
+}
+
 // After an abort or error, keep every COMPLETED step (tool side effects really
 // happened and the model should remember them) but drop a trailing assistant
 // whose tool calls were left unanswered, so the next request stays valid.
@@ -99,7 +175,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.5 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.6 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -107,12 +183,22 @@ export function App({ provider, warning }: Props): React.ReactElement {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingApproval | null>(null);
+  const [tokenCount, setTokenCount] = useState(0);
 
   const busyRef = useRef(false); // authoritative re-entrancy guard
   const abortRef = useRef<AbortController | null>(null);
   const resolvePendingRef = useRef<((approved: boolean) => void) | null>(null);
   const pendingSinceRef = useRef(0); // when the current prompt appeared (type-ahead guard)
   const history = useRef<Message[]>([]); // user/assistant/tool messages for the model
+
+  // Calculate token count from turns (displayed messages)
+  const displayedTokenCount = useMemo((): number => {
+    let count = 0;
+    for (const turn of turns) {
+      count += estimateTokens(turn.content);
+    }
+    return count;
+  }, [turns]);
 
   const resolvePending = useCallback((approved: boolean): void => {
     const resolve = resolvePendingRef.current;
@@ -216,6 +302,10 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
       setTurns((prev) => [...prev, { role: 'user', content: text }]);
       history.current.push({ role: 'user', content: text });
+      // Compact history if it exceeds the context window
+      if (estimateHistoryTokens(history.current) > CONTEXT_WINDOW_TOKENS * 0.9) {
+        history.current = compactHistory(history.current) as Message[];
+      }
 
       const events: AgentEvents = {
         onText: appendText,
@@ -299,17 +389,26 @@ export function App({ provider, warning }: Props): React.ReactElement {
         )}
       </Box>
 
-      <StatusBar />
+      <StatusBar tokenCount={displayedTokenCount} maxTokens={CONTEXT_WINDOW_TOKENS} />
     </Box>
   );
 }
 
-function StatusBar(): React.ReactElement {
+interface StatusBarProps {
+  tokenCount: number;
+  maxTokens: number;
+}
+
+function StatusBar({ tokenCount, maxTokens }: StatusBarProps): React.ReactElement {
+  const tokenK = Math.floor(tokenCount / 1000);
+  const maxK = Math.floor(maxTokens / 1000);
   return (
     <Box flexShrink={0} paddingX={1} paddingY={0}>
       <Box flexDirection="row" justifyContent="space-between" width="100%">
         <Text color="white" dimColor>{process.cwd()}</Text>
-        <Text color="white" dimColor>context: 0k/200k</Text>
+        <Text color="white" dimColor>
+          context: {tokenK}k/{maxK}k
+        </Text>
       </Box>
     </Box>
   );
