@@ -269,7 +269,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.10 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.11 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -462,8 +462,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
       {busy && !pending ? (
         <Box flexShrink={0} paddingX={1}>
           <Text color="cyanBright">
-            <Spinner type="dots" /> thinking… <Text color="white">|</Text>{' '}
-            <Text color="gray">(Esc to cancel)</Text>
+            <Spinner type="dots" /> thinking…
           </Text>
         </Box>
       ) : null}
