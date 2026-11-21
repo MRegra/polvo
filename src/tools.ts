@@ -46,7 +46,7 @@ async function resolveWithin(
   if (typeof input !== 'string' || input.trim() === '') {
     throw new Error('expected a non-empty "path" string');
   }
-  if (/[\p{Cc}\p{Cf}]/u.test(input)) {
+  if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(input)) {
     // control chars AND Unicode format/bidi chars (RTL override, zero-width) —
     // both can spoof the approval prompt or hide the true target.
     throw new Error('path contains control characters');

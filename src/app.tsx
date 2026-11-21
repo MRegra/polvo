@@ -47,7 +47,7 @@ function summarize(result: string): string {
 function sanitize(s: string): string {
   // control chars (incl. ESC), Unicode format/bidi chars (RTL override,
   // zero-width), and line/paragraph separators — all can conceal or reorder.
-  return s.replace(/[\p{Cc}\p{Cf}  ]/gu, '');
+  return s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '');
 }
 
 // After an abort or error, keep every COMPLETED step (tool side effects really
