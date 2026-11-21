@@ -12,7 +12,7 @@ export interface AgentEvents {
   }): Promise<boolean>;
 }
 
-const MAX_STEPS = 25;
+const MAX_STEPS = 1000;
 
 /**
  * Run one user turn to completion: call the model, run any tools it asks for,

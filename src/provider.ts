@@ -40,7 +40,7 @@ export interface Provider {
 }
 
 const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
-const NUM_CTX = 16384;
+const NUM_CTX = 150_000;
 
 function toOllama(m: Message): OllamaMessage {
   const msg: OllamaMessage = { role: m.role, content: m.content };
