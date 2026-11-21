@@ -401,7 +401,7 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
     case 'tool-result':
       return (
         <Box marginBottom={1}>
-          <Text color={turn.error ? 'red' : 'gray'}> {sanitizeText(turn.content)}</Text>
+          <Text color={turn.error ? 'red' : 'gray'}>✓ {sanitizeText(turn.content)}</Text>
         </Box>
       );
     default: {
