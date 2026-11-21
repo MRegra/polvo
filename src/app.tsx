@@ -1,5 +1,5 @@
-import React, { useCallback, useRef, useState } from 'react';
-import { Box, Static, Text, useApp, useInput, useStdin } from 'ink';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Box, Text, useApp, useInput, useStdin } from 'ink';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import type { Message, Provider } from './provider.js';
@@ -17,10 +17,10 @@ interface Props {
 }
 
 /**
- * The whole polvo UI. Finished turns live in <Static> (printed once, they scroll
- * up like normal terminal output); the in-progress reply and the input box are
- * the only things that re-render, pinned at the bottom. No tools yet — on submit
- * we just stream the model's reply.
+ * The whole polvo UI. The app fills the full terminal height: the conversation
+ * is bottom-aligned in a flexible area (newest turns sit just above the input;
+ * older ones scroll off the top), and the input box is pinned to the bottom.
+ * No tools yet — on submit we just stream the model's reply.
  */
 export function App({ provider, warning }: Props): React.ReactElement {
   const { exit } = useApp();
@@ -30,9 +30,20 @@ export function App({ provider, warning }: Props): React.ReactElement {
   // and never echoed by the terminal — including while a reply is generating.
   useInput(() => {}, { isActive: isRawModeSupported });
 
+  // Re-render on terminal resize so the full-height layout tracks the window.
+  const [, bumpResize] = useState(0);
+  useEffect(() => {
+    const onResize = (): void => bumpResize((n) => n + 1);
+    process.stdout.on('resize', onResize);
+    return () => {
+      process.stdout.off('resize', onResize);
+    };
+  }, []);
+  const rows = process.stdout.rows ?? 24;
+
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: `🐙 polvo v0.1.0 · model: ${provider.model}` },
+      { role: 'header', content: `🐙 polvo v0.1.1 · model: ${provider.model}` },
     ];
     if (warning) seed.push({ role: 'system', content: warning });
     return seed;
@@ -85,23 +96,30 @@ export function App({ provider, warning }: Props): React.ReactElement {
   );
 
   return (
-    <Box flexDirection="column">
-      <Static items={turns}>
-        {(turn, index) => <TurnView key={index} turn={turn} />}
-      </Static>
-
-      {streaming !== null && (
-        <TurnView turn={{ role: 'assistant', content: streaming || '…' }} />
-      )}
+    <Box flexDirection="column" height={rows}>
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        justifyContent="flex-end"
+        overflow="hidden"
+      >
+        {turns.map((turn, index) => (
+          <TurnView key={index} turn={turn} />
+        ))}
+        {streaming !== null && (
+          <TurnView turn={{ role: 'assistant', content: streaming || '…' }} />
+        )}
+      </Box>
 
       <Box
+        flexShrink={0}
         marginTop={1}
         borderStyle="round"
         borderColor={busy ? 'gray' : 'cyan'}
         paddingX={1}
       >
         {busy ? (
-          <Text color="gray">
+          <Text color="cyanBright">
             <Spinner type="dots" /> thinking…
           </Text>
         ) : (
