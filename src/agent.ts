@@ -5,13 +5,19 @@ export interface AgentEvents {
   onText(delta: string): void;
   onToolCall(name: string, args: Record<string, unknown>): void;
   onToolResult(name: string, result: string, isError: boolean): void;
+  /** Ask the user to approve a tool that mutates state; resolves true to allow. */
+  confirm(request: {
+    tool: string;
+    args: Record<string, unknown>;
+  }): Promise<boolean>;
 }
 
 const MAX_STEPS = 10;
 
 /**
  * Run one user turn to completion: call the model, run any tools it asks for,
- * feed the results back, and loop until it replies with no tool calls. Mutates
+ * feed the results back, and loop until it replies with no tool calls. Tools
+ * marked requiresApproval are gated behind events.confirm first. Mutates
  * `history` in place (appends the assistant turn and one 'tool' turn per call),
  * so the caller can roll back to a saved length on failure.
  */
@@ -47,6 +53,12 @@ export async function runAgent(
       if (!tool) {
         result = `unknown tool: ${call.name}`;
         isError = true;
+      } else if (
+        tool.requiresApproval &&
+        !(await events.confirm({ tool: call.name, args: call.args }))
+      ) {
+        // A decline is a normal outcome, not an error — the model should adapt.
+        result = 'the user declined this action';
       } else {
         try {
           result = await tool.run(call.args);
@@ -57,6 +69,7 @@ export async function runAgent(
       }
       events.onToolResult(call.name, result, isError);
       history.push({ role: 'tool', content: result, tool_name: call.name });
+      if (signal?.aborted) return; // Esc during a tool / its approval
     }
   }
 

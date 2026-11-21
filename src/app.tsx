@@ -21,6 +21,11 @@ interface Turn {
   error?: boolean; // a failed tool result
 }
 
+interface PendingApproval {
+  tool: string;
+  args: Record<string, unknown>;
+}
+
 interface Props {
   provider: Provider;
   warning?: string | null;
@@ -50,21 +55,41 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: `🐙 polvo v0.2.1 · model: ${provider.model}` },
+      { role: 'header', content: `🐙 polvo v0.3.0 · model: ${provider.model}` },
     ];
     if (warning) seed.push({ role: 'system', content: warning });
     return seed;
   });
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<PendingApproval | null>(null);
 
   const busyRef = useRef(false); // authoritative re-entrancy guard
   const abortRef = useRef<AbortController | null>(null);
+  const resolvePendingRef = useRef<((approved: boolean) => void) | null>(null);
   const history = useRef<Message[]>([]); // user/assistant/tool messages for the model
 
-  // Hold raw mode so keystrokes never echo; Esc cancels an in-flight turn.
+  const resolvePending = useCallback((approved: boolean): void => {
+    const resolve = resolvePendingRef.current;
+    resolvePendingRef.current = null;
+    setPending(null);
+    resolve?.(approved);
+  }, []);
+
+  // Hold raw mode so keystrokes never echo. While an approval is pending, y/n
+  // answers it (Esc = no + cancel the turn); otherwise Esc cancels the turn.
   useInput(
-    (_input, key) => {
+    (inputChar, key) => {
+      if (resolvePendingRef.current) {
+        const ch = inputChar.toLowerCase();
+        if (ch === 'y') resolvePending(true);
+        else if (ch === 'n') resolvePending(false);
+        else if (key.escape) {
+          resolvePending(false);
+          abortRef.current?.abort();
+        }
+        return;
+      }
       if (key.escape) abortRef.current?.abort();
     },
     { isActive: isRawModeSupported },
@@ -107,6 +132,20 @@ export function App({ provider, warning }: Props): React.ReactElement {
     });
   }, []);
 
+  // Returns a promise the agent loop awaits; it resolves when the user answers
+  // the approval prompt (see useInput above).
+  const confirm = useCallback(
+    (req: {
+      tool: string;
+      args: Record<string, unknown>;
+    }): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        setPending({ tool: req.tool, args: req.args });
+        resolvePendingRef.current = resolve;
+      }),
+    [],
+  );
+
   const onSubmit = useCallback(
     async (raw: string): Promise<void> => {
       if (busyRef.current) return;
@@ -146,6 +185,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
             },
           ]);
         },
+        confirm,
       };
 
       try {
@@ -161,12 +201,13 @@ export function App({ provider, warning }: Props): React.ReactElement {
         const msg = err instanceof Error ? err.message : String(err);
         setTurns((prev) => [...prev, { role: 'system', content: `⚠ ${msg}` }]);
       } finally {
+        if (resolvePendingRef.current) resolvePending(false);
         abortRef.current = null;
         busyRef.current = false;
         setBusy(false);
       }
     },
-    [provider, exit, appendText, finalizeAssistant],
+    [provider, exit, appendText, finalizeAssistant, confirm, resolvePending],
   );
 
   return (
@@ -186,10 +227,12 @@ export function App({ provider, warning }: Props): React.ReactElement {
         flexShrink={0}
         marginTop={1}
         borderStyle="round"
-        borderColor={busy ? 'gray' : 'cyan'}
+        borderColor={pending ? 'yellow' : busy ? 'gray' : 'cyan'}
         paddingX={1}
       >
-        {busy ? (
+        {pending ? (
+          <ApprovalPrompt pending={pending} />
+        ) : busy ? (
           <Text color="cyanBright">
             <Spinner type="dots" /> thinking…{' '}
             <Text color="gray">(Esc to cancel)</Text>
@@ -206,6 +249,57 @@ export function App({ provider, warning }: Props): React.ReactElement {
           </Box>
         )}
       </Box>
+    </Box>
+  );
+}
+
+function ApprovalPrompt({
+  pending,
+}: {
+  pending: PendingApproval;
+}): React.ReactElement {
+  const path = typeof pending.args.path === 'string' ? pending.args.path : '?';
+  const content =
+    typeof pending.args.content === 'string' ? pending.args.content : '';
+  const lines = content.split('\n');
+  const preview = lines.slice(0, 8);
+  return (
+    <Box flexDirection="column">
+      <Text color="yellowBright" bold>
+        🔐 polvo wants to {pending.tool.replace(/_/g, ' ')}
+      </Text>
+      {pending.tool === 'write_file' ? (
+        <Box flexDirection="column">
+          <Text color="white">
+            {path}{' '}
+            <Text color="gray">
+              ({content.length} chars, {lines.length} line
+              {lines.length === 1 ? '' : 's'})
+            </Text>
+          </Text>
+          {preview.map((line, i) => (
+            <Text key={i} color="gray">
+              │ {line}
+            </Text>
+          ))}
+          {lines.length > preview.length ? (
+            <Text color="gray">│ … (+{lines.length - preview.length} more)</Text>
+          ) : null}
+        </Box>
+      ) : (
+        <Text color="gray">{JSON.stringify(pending.args)}</Text>
+      )}
+      <Text>
+        apply?{' '}
+        <Text color="greenBright" bold>
+          y
+        </Text>
+        <Text color="gray"> = yes · </Text>
+        <Text color="red" bold>
+          n
+        </Text>
+        <Text color="gray"> = no · Esc = cancel turn</Text>
+      </Text>
     </Box>
   );
 }

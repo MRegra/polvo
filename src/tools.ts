@@ -1,19 +1,35 @@
-import { open, readdir, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { open, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 import type { ToolSchema } from './provider.js';
 
 export interface Tool {
   schema: ToolSchema;
+  requiresApproval?: boolean; // the agent loop asks the user before running this
   run(args: Record<string, unknown>): Promise<string>;
 }
 
 /**
  * Resolve a model-supplied path against the working directory and refuse
  * anything that escapes it — including via a symlink, by resolving the REAL
- * (link-followed) path and comparing that to the real working directory. The
- * returned value is the resolved real path, safe to stat/open.
+ * (link-followed) path and comparing it to the real working directory. The
+ * returned value is the resolved real path, safe to stat/open/write.
+ *
+ * With `mustExist: false` (writing a new file) the target itself may not exist,
+ * so its nearest existing ancestor is resolved instead and the boundary is
+ * checked against that — a symlinked parent still can't smuggle a write outside.
  */
-async function safePath(input: unknown): Promise<string> {
+async function resolveWithin(
+  input: unknown,
+  mustExist: boolean,
+): Promise<string> {
   if (typeof input !== 'string' || input.trim() === '') {
     throw new Error('expected a non-empty "path" string');
   }
@@ -23,7 +39,14 @@ async function safePath(input: unknown): Promise<string> {
   try {
     real = await realpath(abs);
   } catch {
-    throw new Error(`cannot access path: ${input}`);
+    if (mustExist) throw new Error(`cannot access path: ${input}`);
+    let realParent: string;
+    try {
+      realParent = await realpath(dirname(abs));
+    } catch {
+      throw new Error(`parent directory does not exist: ${input}`);
+    }
+    real = join(realParent, basename(abs));
   }
   const rel = relative(root, real);
   if (
@@ -54,7 +77,7 @@ const readFileTool: Tool = {
     },
   },
   async run(args) {
-    const abs = await safePath(args.path);
+    const abs = await resolveWithin(args.path, true);
     const info = await stat(abs);
     if (!info.isFile()) {
       throw new Error('not a regular file');
@@ -97,7 +120,7 @@ const listDirTool: Tool = {
       typeof args.path === 'string' && args.path.trim() !== ''
         ? args.path
         : '.';
-    const abs = await safePath(input);
+    const abs = await resolveWithin(input, true);
     const info = await stat(abs);
     if (!info.isDirectory()) {
       throw new Error('not a directory');
@@ -110,9 +133,50 @@ const listDirTool: Tool = {
   },
 };
 
+const writeFileTool: Tool = {
+  requiresApproval: true, // the agent loop gates this behind the user's yes
+  schema: {
+    name: 'write_file',
+    description:
+      'Create or overwrite a UTF-8 text file with the given full content. The path is relative to the working directory. The user is asked to approve before anything is written.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'file path, relative to the working directory',
+        },
+        content: {
+          type: 'string',
+          description: 'the complete new contents of the file',
+        },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  async run(args) {
+    if (typeof args.content !== 'string') {
+      throw new Error('expected a "content" string');
+    }
+    const abs = await resolveWithin(args.path, false);
+    const info = await stat(abs).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    });
+    if (info && !info.isFile()) {
+      throw new Error('refusing to overwrite a non-regular file');
+    }
+    await writeFile(abs, args.content, 'utf8');
+    const lines = args.content.split('\n').length;
+    const path = typeof args.path === 'string' ? args.path : '';
+    return `wrote ${args.content.length} chars (${lines} line${lines === 1 ? '' : 's'}) to ${path}`;
+  },
+};
+
 export const TOOLS: Record<string, Tool> = {
   read_file: readFileTool,
   list_dir: listDirTool,
+  write_file: writeFileTool,
 };
 
 export const TOOL_SCHEMAS: ToolSchema[] = Object.values(TOOLS).map(
