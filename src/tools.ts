@@ -1,5 +1,5 @@
-import { readFile, readdir } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { open, readdir, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ToolSchema } from './provider.js';
 
 export interface Tool {
@@ -9,23 +9,33 @@ export interface Tool {
 
 /**
  * Resolve a model-supplied path against the working directory and refuse
- * anything that escapes it. This is the one safety boundary for the read-only
- * tools — the model can only see files at or below where polvo was launched.
+ * anything that escapes it — including via a symlink, by resolving the REAL
+ * (link-followed) path and comparing that to the real working directory. The
+ * returned value is the resolved real path, safe to stat/open.
  */
-function safePath(input: unknown): string {
+async function safePath(input: unknown): Promise<string> {
   if (typeof input !== 'string' || input.trim() === '') {
     throw new Error('expected a non-empty "path" string');
   }
-  const root = process.cwd();
+  const root = await realpath(process.cwd());
   const abs = resolve(root, input);
-  const rel = relative(root, abs);
-  if (rel.startsWith('..') || isAbsolute(rel)) {
+  let real: string;
+  try {
+    real = await realpath(abs);
+  } catch {
+    throw new Error(`cannot access path: ${input}`);
+  }
+  const rel = relative(root, real);
+  if (
+    rel !== '' &&
+    (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+  ) {
     throw new Error(`path escapes the working directory: ${input}`);
   }
-  return abs;
+  return real;
 }
 
-const MAX_CHARS = 50_000;
+const MAX_BYTES = 48_000;
 
 const readFileTool: Tool = {
   schema: {
@@ -44,11 +54,25 @@ const readFileTool: Tool = {
     },
   },
   async run(args) {
-    const abs = safePath(args.path);
-    const data = await readFile(abs, 'utf8');
-    return data.length > MAX_CHARS
-      ? `${data.slice(0, MAX_CHARS)}\n…[truncated at ${MAX_CHARS} chars]`
-      : data;
+    const abs = await safePath(args.path);
+    const info = await stat(abs);
+    if (!info.isFile()) {
+      throw new Error('not a regular file');
+    }
+    // Bounded read via a handle: never slurp a huge (or endless, e.g. /dev/zero)
+    // file into memory; a FIFO is already rejected by the isFile() check above.
+    const fh = await open(abs, 'r');
+    try {
+      const buf = Buffer.alloc(MAX_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, MAX_BYTES, 0);
+      let text = buf.toString('utf8', 0, bytesRead);
+      if (info.size > MAX_BYTES) {
+        text += `\n…[truncated at ${MAX_BYTES} bytes]`;
+      }
+      return text;
+    } finally {
+      await fh.close();
+    }
   },
 };
 
@@ -73,7 +97,11 @@ const listDirTool: Tool = {
       typeof args.path === 'string' && args.path.trim() !== ''
         ? args.path
         : '.';
-    const abs = safePath(input);
+    const abs = await safePath(input);
+    const info = await stat(abs);
+    if (!info.isDirectory()) {
+      throw new Error('not a directory');
+    }
     const entries = await readdir(abs, { withFileTypes: true });
     const lines = entries
       .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))

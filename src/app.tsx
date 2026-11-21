@@ -50,7 +50,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: `🐙 polvo v0.2.0 · model: ${provider.model}` },
+      { role: 'header', content: `🐙 polvo v0.2.1 · model: ${provider.model}` },
     ];
     if (warning) seed.push({ role: 'system', content: warning });
     return seed;
