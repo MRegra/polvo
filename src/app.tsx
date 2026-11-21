@@ -50,6 +50,20 @@ function sanitize(s: string): string {
   return s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '');
 }
 
+// Sanitize text for display: remove control chars that can mess with the
+// terminal (ANSI escapes, bidi overrides, zero-width chars) but preserve
+// tab and newline so the text remains readable. Carriage returns are removed
+// because they can cause text to overwrite itself in the terminal.
+function sanitizeText(s: string): string {
+  // Remove all control characters except tab (U+0009) and newline (U+000A).
+  // This catches ESC (U+001B, start of ANSI codes), carriage return (U+000D),
+  // and all other C0/C1 controls that could alter terminal behavior.
+  // Then remove Unicode format/bidi/zero-width chars that can conceal or reorder.
+  return s
+    .replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, '')
+    .replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, '');
+}
+
 // After an abort or error, keep every COMPLETED step (tool side effects really
 // happened and the model should remember them) but drop a trailing assistant
 // whose tool calls were left unanswered, so the next request stays valid.
@@ -85,9 +99,9 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: `🐙 polvo v0.3.1 · model: ${provider.model}` },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.1 · model: ${provider.model}`) },
     ];
-    if (warning) seed.push({ role: 'system', content: warning });
+    if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
   });
   const [input, setInput] = useState('');
@@ -144,14 +158,15 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   // --- display updates driven by the agent loop -----------------------------
   const appendText = useCallback((delta: string): void => {
+    const cleanDelta = sanitizeText(delta);
     setTurns((prev) => {
       const last = prev[prev.length - 1];
       if (last?.role === 'assistant' && last.streaming) {
         const next = [...prev];
-        next[next.length - 1] = { ...last, content: last.content + delta };
+        next[next.length - 1] = { ...last, content: last.content + cleanDelta };
         return next;
       }
-      return [...prev, { role: 'assistant', content: delta, streaming: true }];
+      return [...prev, { role: 'assistant', content: cleanDelta, streaming: true }];
     });
   }, []);
 
@@ -186,7 +201,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
   const onSubmit = useCallback(
     async (raw: string): Promise<void> => {
       if (busyRef.current) return;
-      const text = raw.trim();
+      const text = sanitizeText(raw.trim());
       setInput('');
       if (text === '') return;
       if (text === '/exit' || text === '/quit') {
@@ -208,15 +223,16 @@ export function App({ provider, warning }: Props): React.ReactElement {
           finalizeAssistant();
           setTurns((prev) => [
             ...prev,
-            { role: 'tool-call', content: `${name}(${compactArgs(args)})` },
+            { role: 'tool-call', content: sanitizeText(`${name}(${compactArgs(args)})`) },
           ]);
         },
         onToolResult: (_name, result, isError) => {
+          const safeResult = isError ? result : summarize(result);
           setTurns((prev) => [
             ...prev,
             {
               role: 'tool-result',
-              content: isError ? result : summarize(result),
+              content: sanitizeText(safeResult),
               error: isError,
             },
           ]);
@@ -229,13 +245,13 @@ export function App({ provider, warning }: Props): React.ReactElement {
         finalizeAssistant();
         if (controller.signal.aborted) {
           dropIncompleteTail(history.current);
-          setTurns((prev) => [...prev, { role: 'system', content: '[cancelled]' }]);
+          setTurns((prev) => [...prev, { role: 'system', content: sanitizeText('[cancelled]') }]);
         }
       } catch (err) {
         finalizeAssistant();
         dropIncompleteTail(history.current); // stay valid, keep completed writes
         const msg = err instanceof Error ? err.message : String(err);
-        setTurns((prev) => [...prev, { role: 'system', content: `⚠ ${msg}` }]);
+        setTurns((prev) => [...prev, { role: 'system', content: sanitizeText(`⚠ ${msg}`) }]);
       } finally {
         if (resolvePendingRef.current) resolvePending(false);
         abortRef.current = null;
@@ -351,32 +367,32 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
       return (
         <Box marginBottom={1}>
           <Text color="magenta" bold>
-            {turn.content}
+            {sanitizeText(turn.content)}
           </Text>
         </Box>
       );
     case 'system':
       return (
         <Box marginBottom={1}>
-          <Text color="yellow">{turn.content}</Text>
+          <Text color="yellow">{sanitizeText(turn.content)}</Text>
         </Box>
       );
     case 'tool-call':
       return (
         <Box>
-          <Text color="blueBright">🔧 {turn.content}</Text>
+          <Text color="blueBright">🔧 {sanitizeText(turn.content)}</Text>
         </Box>
       );
     case 'tool-result':
       return (
         <Box marginBottom={1}>
-          <Text color={turn.error ? 'red' : 'gray'}> {turn.content}</Text>
+          <Text color={turn.error ? 'red' : 'gray'}> {sanitizeText(turn.content)}</Text>
         </Box>
       );
     default: {
       const isUser = turn.role === 'user';
       const body =
-        turn.content !== '' ? turn.content : turn.streaming ? '…' : '';
+        turn.content !== '' ? sanitizeText(turn.content) : turn.streaming ? '…' : '';
       return (
         <Box flexDirection="column" marginBottom={1}>
           <Text color={isUser ? 'cyan' : 'green'} bold>
