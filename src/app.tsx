@@ -284,31 +284,35 @@ export function App({ provider, warning }: Props): React.ReactElement {
         {pending ? (
           <ApprovalPrompt pending={pending} />
         ) : busy ? (
-          <Text color="cyanBright">
-            <Spinner type="dots" /> thinking… <Text color="white">|</Text>{' '}
-            <Text color="gray">(Esc to cancel)</Text>
-          </Text>
+          <Box flexDirection="column">
+            <Text color="cyanBright">
+              <Spinner type="dots" /> thinking… <Text color="white">|</Text>{' '}
+              <Text color="gray">(Esc to cancel)</Text>
+            </Text>
+            <StatusBar />
+          </Box>
         ) : (
-          <Box>
-            <Text color="cyan">❯ </Text>
-            <TextInput
-              value={input}
-              onChange={(v) => setInput(v.replace(/[\r\n]+/g, ' '))}
-              onSubmit={onSubmit}
-              placeholder="type a message · /exit to quit"
-            />
+          <Box flexDirection="column">
+            <Box>
+              <Text color="cyan">❯ </Text>
+              <TextInput
+                value={input}
+                onChange={(v) => setInput(v.replace(/[\r\n]+/g, ' '))}
+                onSubmit={onSubmit}
+                placeholder="type a message · /exit to quit"
+              />
+            </Box>
+            <StatusBar />
           </Box>
         )}
       </Box>
-
-      <StatusBar />
     </Box>
   );
 }
 
 function StatusBar(): React.ReactElement {
   return (
-    <Box flexShrink={0} paddingX={1} paddingY={0}>
+    <Box flexShrink={0} paddingY={0}>
       <Text color="gray" dimColor>
         {process.cwd()} · context: 200k
       </Text>
