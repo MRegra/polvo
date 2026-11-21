@@ -1,26 +1,56 @@
-import { Ollama } from 'ollama';
+import { Ollama, type Message as OllamaMessage, type Tool } from 'ollama';
+
+export interface ToolCall {
+  name: string;
+  args: Record<string, unknown>;
+}
 
 export interface Message {
-  role: 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  tool_calls?: ToolCall[]; // on assistant turns that call tools
+  tool_name?: string; // on tool-result turns
+}
+
+export interface ToolSchema {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>; // JSON schema for the tool's args
+}
+
+export interface ChatResult {
+  text: string;
+  toolCalls: ToolCall[];
 }
 
 /**
- * A model backend. Everything the agent needs from an LLM goes through this
- * interface, so swapping the local model for a different one — or a remote API
- * later — is a new class, not a rewrite of the REPL.
+ * A model backend. One call = one model response, which is either text, a set
+ * of tool calls, or both. The agent loop (src/agent.ts) drives the tools; the
+ * provider only knows how to talk to the model.
  */
 export interface Provider {
   readonly name: string;
   readonly model: string;
-  /**
-   * Stream one assistant reply. Calls `onText` with each text delta as it
-   * arrives, and resolves to the complete reply text.
-   */
-  stream(messages: Message[], onText: (delta: string) => void): Promise<string>;
+  chat(
+    messages: Message[],
+    tools: ToolSchema[],
+    onText: (delta: string) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatResult>;
 }
 
 const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
+
+function toOllama(m: Message): OllamaMessage {
+  const msg: OllamaMessage = { role: m.role, content: m.content };
+  if (m.tool_calls?.length) {
+    msg.tool_calls = m.tool_calls.map((tc) => ({
+      function: { name: tc.name, arguments: tc.args },
+    }));
+  }
+  if (m.tool_name) msg.tool_name = m.tool_name;
+  return msg;
+}
 
 export class OllamaProvider implements Provider {
   readonly name = 'ollama';
@@ -34,32 +64,64 @@ export class OllamaProvider implements Provider {
     this.client = new Ollama({ host });
   }
 
-  async stream(
+  async chat(
     messages: Message[],
+    tools: ToolSchema[],
     onText: (delta: string) => void,
-  ): Promise<string> {
+    signal?: AbortSignal,
+  ): Promise<ChatResult> {
+    const ollamaTools: Tool[] = tools.map((t) => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters as Tool['function']['parameters'],
+      },
+    }));
+
     const response = await this.client.chat({
       model: this.model,
       stream: true,
-      messages: [{ role: 'system', content: this.system }, ...messages],
+      messages: [
+        { role: 'system', content: this.system },
+        ...messages.map(toOllama),
+      ],
+      tools: ollamaTools,
+      options: { num_ctx: 8192 },
     });
 
-    let full = '';
-    for await (const part of response) {
-      const delta = part.message?.content ?? '';
-      if (delta) {
-        full += delta;
-        onText(delta);
-      }
+    // Esc / Ctrl-C aborts the in-flight generation (see src/app.tsx).
+    if (signal) {
+      signal.addEventListener('abort', () => response.abort(), { once: true });
     }
-    return full;
+
+    let text = '';
+    const toolCalls: ToolCall[] = [];
+    try {
+      for await (const part of response) {
+        const delta = part.message?.content ?? '';
+        if (delta) {
+          text += delta;
+          onText(delta);
+        }
+        for (const call of part.message?.tool_calls ?? []) {
+          toolCalls.push({
+            name: call.function.name,
+            args: (call.function.arguments ?? {}) as Record<string, unknown>,
+          });
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) return { text, toolCalls }; // abort is not an error
+      throw err;
+    }
+    return { text, toolCalls };
   }
 }
 
 /**
  * Preflight: is Ollama reachable, and is the model present? Returns a
- * human-readable warning, or null when all is well. Never throws — a startup
- * hint must not block the program.
+ * human-readable warning, or null when all is well. Never throws.
  */
 export async function checkOllama(
   model: string,
