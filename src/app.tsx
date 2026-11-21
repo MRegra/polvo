@@ -269,7 +269,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.9 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.10 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -447,10 +447,12 @@ export function App({ provider, warning }: Props): React.ReactElement {
   );
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" height={rows}>
       <Box
         flexDirection="column"
-        marginBottom={1}
+        flexGrow={1}
+        justifyContent="flex-end"
+        overflow="hidden"
       >
         {turns.map((turn, index) => (
           <TurnView key={index} turn={turn} />
