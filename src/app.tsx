@@ -406,12 +406,14 @@ interface StatusBarProps {
 function StatusBar({ tokenCount, maxTokens }: StatusBarProps): React.ReactElement {
   const tokenK = Math.floor(tokenCount / 1000);
   const maxK = Math.floor(maxTokens / 1000);
+  // Calculate percentage for potential color coding
+  const percentage = Math.min(100, Math.floor((tokenCount / maxTokens) * 100));
   return (
     <Box flexShrink={0} paddingX={1} paddingY={0}>
       <Box flexDirection="row" justifyContent="space-between" width="100%">
         <Text color="white" dimColor>{process.cwd()}</Text>
-        <Text color="white" dimColor>
-          context: {tokenK}k/{maxK}k
+        <Text color={percentage > 80 ? 'yellow' : percentage > 60 ? 'cyan' : 'white'}> 
+          {tokenCount}/{maxTokens} ({tokenK}k/{maxK}k)
         </Text>
       </Box>
     </Box>
