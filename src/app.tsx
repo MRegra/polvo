@@ -268,7 +268,6 @@ export function App({ provider, warning }: Props): React.ReactElement {
         flexDirection="column"
         flexGrow={1}
         justifyContent="flex-end"
-        overflow="hidden"
       >
         {turns.map((turn, index) => (
           <TurnView key={index} turn={turn} />
