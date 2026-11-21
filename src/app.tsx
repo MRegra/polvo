@@ -175,7 +175,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.6 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.7 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -363,19 +363,23 @@ export function App({ provider, warning }: Props): React.ReactElement {
         ))}
       </Box>
 
-      <Box
-        flexShrink={0}
-        borderStyle="round"
-        borderColor={pending ? 'yellow' : busy ? 'gray' : 'cyan'}
-        paddingX={1}
-      >
-        {pending ? (
-          <ApprovalPrompt pending={pending} />
-        ) : busy ? (
+      {busy && !pending ? (
+        <Box flexShrink={0} paddingX={1}>
           <Text color="cyanBright">
             <Spinner type="dots" /> thinking… <Text color="white">|</Text>{' '}
             <Text color="gray">(Esc to cancel)</Text>
           </Text>
+        </Box>
+      ) : null}
+
+      <Box
+        flexShrink={0}
+        borderStyle="round"
+        borderColor={pending ? 'yellow' : 'cyan'}
+        paddingX={1}
+      >
+        {pending ? (
+          <ApprovalPrompt pending={pending} />
         ) : (
           <Box>
             <Text color="cyan">❯ </Text>
