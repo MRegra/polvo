@@ -77,6 +77,100 @@ function estimateTokens(text: string): number {
 // Context window configuration
 const CONTEXT_WINDOW_TOKENS = 200_000;
 
+// Simple markdown renderer for assistant messages
+// Converts markdown to Ink/React elements for better display
+function renderMarkdown(content: string): React.ReactElement {
+  // Split by markdown block elements first (code blocks, etc.)
+  const parts: React.ReactElement[] = [];
+  
+  // Handle code blocks (```...```)
+  const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+  
+  while ((match = codeBlockRegex.exec(content)) !== null) {
+    // Add text before the code block
+    if (match.index > lastIndex) {
+      parts.push(<Text key={parts.length}>{processInlineMarkdown(content.slice(lastIndex, match.index))}</Text>);
+    }
+    
+    // Add the code block
+    const language = match[1];
+    const code = match[2].trim();
+    parts.push(
+      <Box key={parts.length} marginY={1}>
+        <Text color="gray">{code}</Text>
+      </Box>
+    );
+    
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Add remaining text
+  if (lastIndex < content.length) {
+    parts.push(<Text key={parts.length}>{processInlineMarkdown(content.slice(lastIndex))}</Text>);
+  }
+  
+  return <>{parts}</>;
+}
+
+// Process inline markdown (bold, italic, inline code)
+function processInlineMarkdown(text: string): React.ReactElement {
+  const elements: React.ReactElement[] = [];
+  let lastIndex = 0;
+  
+  // Process bold: **text** or __text__
+  const boldRegex = /(\*\*|__)([^*_]+)\1/g;
+  let match;
+  
+  while ((match = boldRegex.exec(text)) !== null) {
+    // Add text before bold
+    if (match.index > lastIndex) {
+      elements.push(<Text key={elements.length}>{text.slice(lastIndex, match.index)}</Text>);
+    }
+    
+    // Add bold text
+    elements.push(<Text key={elements.length} bold>{match[2]}</Text>);
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Process italic: *text* or _text_
+  const italicRegex = /([^*_])(\*|_)([^*_]+)\2/g;
+  while ((match = italicRegex.exec(text)) !== null) {
+    // Skip single asterisks that aren't markdown
+    if (match[1] !== ' ' && match[1] !== '') continue;
+    
+    // Add text before italic
+    if (match.index > lastIndex) {
+      elements.push(<Text key={elements.length}>{text.slice(lastIndex, match.index)}</Text>);
+    }
+    
+    // Add italic text
+    elements.push(<Text key={elements.length} italic>{match[3]}</Text>);
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Process inline code: `code`
+  const inlineCodeRegex = /`([^`]+)`/g;
+  while ((match = inlineCodeRegex.exec(text)) !== null) {
+    // Add text before code
+    if (match.index > lastIndex) {
+      elements.push(<Text key={elements.length}>{text.slice(lastIndex, match.index)}</Text>);
+    }
+    
+    // Add inline code
+    elements.push(<Text key={elements.length} color="gray">{match[1]}</Text>);
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Add remaining text
+  if (lastIndex < text.length) {
+    elements.push(<Text key={elements.length}>{text.slice(lastIndex)}</Text>);
+  }
+  
+  return <>{elements}</>;
+}
+
 // Context window management: tracks current usage and provides compaction
 // Best practices:
 // 1. Count tokens accurately (approximation for now)
@@ -175,7 +269,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.8 · model: ${provider.model}`) },
+      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.9 · model: ${provider.model}`) },
     ];
     if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
     return seed;
@@ -501,7 +595,8 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
     case 'tool-result':
       return (
         <Box marginBottom={1}>
-          <Text color={turn.error ? 'red' : 'gray'}>✓ {sanitizeText(turn.content)}</Text>
+          <Text color={turn.error ? 'red' : 'gray'}>✓ </Text>
+          <Box>{renderMarkdown(sanitizeText(turn.content))}</Box>
         </Box>
       );
     default: {
@@ -513,7 +608,11 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
           <Text color={isUser ? 'cyan' : 'green'} bold>
             {isUser ? 'you' : '🐙 polvo'}
           </Text>
-          <Text>{body}</Text>
+          {isUser ? (
+            <Text>{body}</Text>
+          ) : (
+            <Box>{renderMarkdown(body)}</Box>
+          )}
         </Box>
       );
     }
