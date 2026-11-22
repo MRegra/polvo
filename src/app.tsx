@@ -19,6 +19,8 @@ import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
 import { SYSTEM_PROMPT } from './config.js';
+import Image from 'ink-picture';
+import { fileURLToPath } from 'node:url';
 type Role =
   | 'header'
   | 'system'
@@ -230,39 +232,67 @@ function buildViewportLines(
   }
   return lines;
 }
-function OctopusLogo(): React.ReactElement {
-  const orange = '#E58A55';
 
+
+const octopusImage = fileURLToPath(
+  new URL('../assets/polvo-octopus-pink.png', import.meta.url)
+);
+
+function OctopusLogo(): React.ReactElement {
   return (
-    <Box flexDirection="column" flexShrink={0}>
-      <Text color={orange}>   ██████   </Text>
-      <Text color={orange}>  ████████  </Text>
-      <Text color={orange}> ██████████ </Text>
-      <Text color={orange}>██  ██  ██</Text>
-      <Text color={orange}> ████████ </Text>
-      <Text color={orange}>  ██  ██  </Text>
+    <Box flexShrink={0}>
+      <Image
+        src={octopusImage}
+        width={14}
+        height={6}
+        objectFit="contain"
+        alt="Polvo octopus mascot"
+      />
     </Box>
   );
 }
 
-function BrandHeader({ provider }: { provider: Provider }): React.ReactElement {
+function BrandHeader({
+  provider,
+}: {
+  provider: Provider;
+}): React.ReactElement {
   const version = '0.3.15';
   const home = process.env.HOME ?? '';
   const cwd = process.cwd();
-  const displayPath = home && cwd.startsWith(home)
-    ? `~${cwd.slice(home.length)}`
-    : cwd;
+
+  const displayPath =
+    home && cwd.startsWith(home)
+      ? `~${cwd.slice(home.length)}`
+      : cwd;
 
   return (
-    <Box flexDirection="row" alignItems="center" paddingX={1} flexShrink={0}>
+    <Box
+      flexDirection="row"
+      alignItems="center"
+      paddingX={2}
+      paddingY={1}
+      gap={3}
+      flexShrink={0}
+    >
       <OctopusLogo />
-      <Box flexDirection="column" marginLeft={2}>
-        <Text>
-          <Text color="#E5E7EB" bold>Polvo</Text>
-          <Text color="gray"> v{version}</Text>
+
+      <Box
+        flexDirection="column"
+        justifyContent="center"
+        flexShrink={1}
+      >
+        <Text color="white" bold>
+          Polvo <Text color="#9299A3">v{version}</Text>
         </Text>
-        <Text color="gray">{provider.model}</Text>
-        <Text color="gray">{displayPath}</Text>
+
+        <Text color="#D1D5DB">
+          {provider.model}
+        </Text>
+
+        <Text color="#9299A3">
+          {displayPath}
+        </Text>
       </Box>
     </Box>
   );

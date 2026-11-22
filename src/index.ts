@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+
 import { parseArgs } from 'node:util';
 import { createElement } from 'react';
 import { render } from 'ink';
+
 import { loadConfig } from './config.js';
 import { OllamaProvider, checkOllama } from './provider.js';
 import { App } from './app.js';
@@ -22,7 +24,11 @@ env:
 while running:
   /exit, /quit       leave   ·   Ctrl-C also quits`;
 
-function parse(): { model?: string; help?: boolean; version?: boolean } {
+function parse(): {
+  model?: string;
+  help?: boolean;
+  version?: boolean;
+} {
   try {
     return parseArgs({
       options: {
@@ -32,17 +38,21 @@ function parse(): { model?: string; help?: boolean; version?: boolean } {
       },
     }).values;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg =
+      err instanceof Error ? err.message : String(err);
+
     console.error(msg + '\n\n' + USAGE);
     process.exit(2);
   }
 }
 
 const values = parse();
+
 if (values.help) {
   console.log(USAGE);
   process.exit(0);
 }
+
 if (values.version) {
   console.log('polvo 0.3.15');
   process.exit(0);
@@ -57,19 +67,29 @@ if (!process.stdin.isTTY) {
 
 const config = loadConfig(values.model);
 const warning = await checkOllama(config.model);
-const provider = new OllamaProvider(config.model, config.system);
-const app = render(createElement(App, { provider, warning }));
+const provider = new OllamaProvider(
+  config.model,
+  config.system,
+);
+
+const app = render(
+  createElement(App, { provider, warning }),
+);
 
 try {
   await app.waitUntilExit();
 } finally {
-  // The Ollama daemon is separate from Polvo. Explicitly unload only the
-  // model this Polvo instance used; do not terminate the shared daemon.
+  // Unload only the model used by this Polvo instance.
+  // Never terminate the shared Ollama daemon.
   try {
     await provider.unload();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`\nCould not unload Ollama model: ${message}`);
+    const message =
+      err instanceof Error ? err.message : String(err);
+
+    console.error(
+      `\nCould not unload Ollama model: ${message}`,
+    );
   }
 }
 
