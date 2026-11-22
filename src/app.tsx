@@ -19,8 +19,8 @@ type Role =
 interface Turn {
   role: Role;
   content: string;
-  streaming?: boolean; // an assistant turn still being written
-  error?: boolean; // a failed tool result
+  streaming?: boolean;
+  error?: boolean;
 }
 
 interface PendingApproval {
@@ -43,191 +43,181 @@ function summarize(result: string): string {
   return `→ ${lines} line${lines === 1 ? '' : 's'}, ${result.length} chars`;
 }
 
-// Strip control characters (incl. ESC) so a model-supplied path or file preview
-// can't use ANSI escapes to conceal or spoof what the approval prompt shows.
 function sanitize(s: string): string {
-  // control chars (incl. ESC), Unicode format/bidi chars (RTL override,
-  // zero-width), and line/paragraph separators — all can conceal or reorder.
   return s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '');
 }
 
-// Sanitize text for display: remove control chars that can mess with the
-// terminal (ANSI escapes, bidi overrides, zero-width chars) but preserve
-// tab and newline so the text remains readable. Carriage returns are removed
-// because they can cause text to overwrite itself in the terminal.
 function sanitizeText(s: string): string {
-  // Remove all control characters except tab (U+0009) and newline (U+000A).
-  // This catches ESC (U+001B, start of ANSI codes), carriage return (U+000D),
-  // and all other C0/C1 controls that could alter terminal behavior.
-  // Then remove Unicode format/bidi/zero-width chars that can conceal or reorder.
   return s
     .replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, '')
     .replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, '');
 }
 
-// Estimate token count from text. Uses a simple approximation:
-// ~4 characters per token for English text. This is not precise but
-// sufficient for UI display. For accurate counting, use a proper tokenizer.
 function estimateTokens(text: string): number {
-  // Remove whitespace for counting (tokens include words + punctuation)
   const trimmed = text.trim();
-  // Approximation: ~4 chars per token
   return Math.floor(trimmed.length / 4);
 }
 
-// Context window configuration
 const CONTEXT_WINDOW_TOKENS = 200_000;
 
-// Simple markdown renderer for assistant messages
-// Converts markdown to Ink/React elements for better display
 function renderMarkdown(content: string): React.ReactElement {
-  // Split by markdown block elements first (code blocks, etc.)
   const parts: React.ReactElement[] = [];
-  
-  // Handle code blocks (```...```)
   const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
   let lastIndex = 0;
   let match;
-  
+
   while ((match = codeBlockRegex.exec(content)) !== null) {
-    // Add text before the code block
     if (match.index > lastIndex) {
-      parts.push(<Text key={parts.length}>{processInlineMarkdown(content.slice(lastIndex, match.index))}</Text>);
+      parts.push(
+        <Text key={parts.length}>
+          {processInlineMarkdown(content.slice(lastIndex, match.index))}
+        </Text>
+      );
     }
-    
-    // Add the code block
-    const language = match[1];
+
     const code = match[2].trim();
+
     parts.push(
       <Box key={parts.length} marginY={1}>
         <Text color="gray">{code}</Text>
       </Box>
     );
-    
+
     lastIndex = match.index + match[0].length;
   }
-  
-  // Add remaining text
+
   if (lastIndex < content.length) {
-    parts.push(<Text key={parts.length}>{processInlineMarkdown(content.slice(lastIndex))}</Text>);
+    parts.push(
+      <Text key={parts.length}>
+        {processInlineMarkdown(content.slice(lastIndex))}
+      </Text>
+    );
   }
-  
+
   return <>{parts}</>;
 }
 
-// Process inline markdown (bold, italic, inline code)
 function processInlineMarkdown(text: string): React.ReactElement {
   const elements: React.ReactElement[] = [];
   let lastIndex = 0;
-  
-  // Process bold: **text** or __text__
+
   const boldRegex = /(\*\*|__)([^*_]+)\1/g;
   let match;
-  
+
   while ((match = boldRegex.exec(text)) !== null) {
-    // Add text before bold
     if (match.index > lastIndex) {
-      elements.push(<Text key={elements.length}>{text.slice(lastIndex, match.index)}</Text>);
+      elements.push(
+        <Text key={elements.length}>
+          {text.slice(lastIndex, match.index)}
+        </Text>
+      );
     }
-    
-    // Add bold text
-    elements.push(<Text key={elements.length} bold>{match[2]}</Text>);
+
+    elements.push(
+      <Text key={elements.length} bold>
+        {match[2]}
+      </Text>
+    );
+
     lastIndex = match.index + match[0].length;
   }
-  
-  // Process italic: *text* or _text_
+
   const italicRegex = /([^*_])(\*|_)([^*_]+)\2/g;
+
   while ((match = italicRegex.exec(text)) !== null) {
-    // Skip single asterisks that aren't markdown
     if (match[1] !== ' ' && match[1] !== '') continue;
-    
-    // Add text before italic
+
     if (match.index > lastIndex) {
-      elements.push(<Text key={elements.length}>{text.slice(lastIndex, match.index)}</Text>);
+      elements.push(
+        <Text key={elements.length}>
+          {text.slice(lastIndex, match.index)}
+        </Text>
+      );
     }
-    
-    // Add italic text
-    elements.push(<Text key={elements.length} italic>{match[3]}</Text>);
+
+    elements.push(
+      <Text key={elements.length} italic>
+        {match[3]}
+      </Text>
+    );
+
     lastIndex = match.index + match[0].length;
   }
-  
-  // Process inline code: `code`
+
   const inlineCodeRegex = /`([^`]+)`/g;
+
   while ((match = inlineCodeRegex.exec(text)) !== null) {
-    // Add text before code
     if (match.index > lastIndex) {
-      elements.push(<Text key={elements.length}>{text.slice(lastIndex, match.index)}</Text>);
+      elements.push(
+        <Text key={elements.length}>
+          {text.slice(lastIndex, match.index)}
+        </Text>
+      );
     }
-    
-    // Add inline code
-    elements.push(<Text key={elements.length} color="gray">{match[1]}</Text>);
+
+    elements.push(
+      <Text key={elements.length} color="gray">
+        {match[1]}
+      </Text>
+    );
+
     lastIndex = match.index + match[0].length;
   }
-  
-  // Add remaining text
+
   if (lastIndex < text.length) {
-    elements.push(<Text key={elements.length}>{text.slice(lastIndex)}</Text>);
+    elements.push(
+      <Text key={elements.length}>
+        {text.slice(lastIndex)}
+      </Text>
+    );
   }
-  
+
   return <>{elements}</>;
 }
 
-// Context window management: tracks current usage and provides compaction
-// Best practices:
-// 1. Count tokens accurately (approximation for now)
-// 2. Trim from the oldest messages when approaching limit
-// 3. Keep system/header messages (they're small and important)
-// 4. Preserve recent conversation flow
-// 5. Never drop the most recent user message (context for next reply)
-// Helper to estimate total tokens in history
 function estimateHistoryTokens(history: Message[]): number {
   let total = 0;
+
   for (const msg of history) {
     total += estimateTokens(msg.content);
   }
+
   return total;
 }
 
-function compactHistory(history: Message[], maxTokens: number = CONTEXT_WINDOW_TOKENS): Message[] {
-  // Count tokens in current history
+function compactHistory(
+  history: Message[],
+  maxTokens: number = CONTEXT_WINDOW_TOKENS
+): Message[] {
   let totalTokens = 0;
+
   for (const msg of history) {
     totalTokens += estimateTokens(msg.content);
   }
 
-  // If under limit, no compaction needed
   if (totalTokens <= maxTokens) {
     return history;
   }
 
-  // Compaction strategy: remove oldest non-system messages first
-  // Keep: system messages, header, and recent messages
   const result: Message[] = [];
   let currentTokens = 0;
 
-  // Traverse from newest to oldest, keeping what fits
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i];
     const msgTokens = estimateTokens(msg.content);
 
-    // Always keep system messages (they're small and important)
     if (msg.role === 'system') {
       result.unshift(msg);
       currentTokens += msgTokens;
       continue;
     }
 
-    // Check if adding this message would exceed the limit
     if (currentTokens + msgTokens <= maxTokens) {
       result.unshift(msg);
       currentTokens += msgTokens;
     } else {
-      // Skip this message (it's too old to fit)
-      // But ensure we keep at least the last user message for context
       if (msg.role === 'user' && result.length > 0 && result[0].role !== 'user') {
-        // This is the oldest user message we're dropping; 
-        // consider summarizing it instead
-        // For now, just drop it - future improvement: add summary
+        // Old messages are dropped when the context limit is exceeded.
       }
     }
   }
@@ -235,17 +225,17 @@ function compactHistory(history: Message[], maxTokens: number = CONTEXT_WINDOW_T
   return result;
 }
 
-// After an abort or error, keep every COMPLETED step (tool side effects really
-// happened and the model should remember them) but drop a trailing assistant
-// whose tool calls were left unanswered, so the next request stays valid.
 function dropIncompleteTail(history: Message[]): void {
   let i = history.length - 1;
   let toolResults = 0;
+
   while (i >= 0 && history[i]?.role === 'tool') {
     toolResults++;
     i--;
   }
+
   const last = history[i];
+
   if (
     last &&
     last.role === 'assistant' &&
@@ -256,13 +246,27 @@ function dropIncompleteTail(history: Message[]): void {
   }
 }
 
+function estimateTurnRows(turn: Turn, columns: number): number {
+  const width = Math.max(20, columns - 4);
+  const content = sanitizeText(turn.content);
+
+  const lines = content.split('\n').reduce(
+    (sum, line) =>
+      sum + Math.max(1, Math.ceil(Math.max(1, line.length) / width)),
+    0
+  );
+
+  return Math.max(
+    2,
+    lines + (turn.role === 'assistant' || turn.role === 'user' ? 2 : 1)
+  );
+}
+
 /**
- * The whole polvo UI. The app fills the terminal height: the conversation is
- * bottom-aligned (newest turns above the input, older scroll off the top) and
- * the input box is pinned to the bottom. All turns — user, assistant, tool
- * calls and tool results — live in one `turns` list; the in-progress assistant
- * reply is the last turn with `streaming: true`. `history` is the parallel
- * message list the agent loop sends to the model.
+ * Main Polvo application.
+ *
+ * Conversation history is displayed inside a height-constrained viewport.
+ * The viewport supports keyboard navigation through previous turns.
  */
 export function App({ provider, warning }: Props): React.ReactElement {
   const { exit } = useApp();
@@ -270,106 +274,219 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
   const [turns, setTurns] = useState<Turn[]>(() => {
     const seed: Turn[] = [
-      { role: 'header', content: sanitizeText(`🐙 polvo v0.3.15 · model: ${provider.model}`) },
+      {
+        role: 'header',
+        content: sanitizeText(`🐙 polvo v0.3.15 · model: ${provider.model}`),
+      },
     ];
-    if (warning) seed.push({ role: 'system', content: sanitizeText(warning) });
+
+    if (warning) {
+      seed.push({
+        role: 'system',
+        content: sanitizeText(warning),
+      });
+    }
+
     return seed;
   });
+
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingApproval | null>(null);
   const [tokenCount, setTokenCount] = useState(0);
 
-  const busyRef = useRef(false); // authoritative re-entrancy guard
+  // Scroll position measured in approximate terminal rows from the bottom.
+  // Zero means follow the newest conversation output.
+  const [scrollOffset, setScrollOffset] = useState(0);
+
+  const busyRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
   const resolvePendingRef = useRef<((approved: boolean) => void) | null>(null);
-  const pendingSinceRef = useRef(0); // when the current prompt appeared (type-ahead guard)
-  const history = useRef<Message[]>([]); // user/assistant/tool messages for the model
+  const pendingSinceRef = useRef(0);
+  const history = useRef<Message[]>([]);
 
-  // Calculate token count from turns + system prompt
-  // This estimates the actual context window sent to the model
   const [contextTokenCount, setContextTokenCount] = useState(0);
-  
-  // Update token count when turns or history changes
+
   useEffect(() => {
     let count = estimateTokens(SYSTEM_PROMPT);
+
     for (const msg of history.current) {
       count += estimateTokens(msg.content);
     }
+
     setContextTokenCount(count);
   }, [turns, history.current.length]);
 
   const resolvePending = useCallback((approved: boolean): void => {
     const resolve = resolvePendingRef.current;
+
     resolvePendingRef.current = null;
     setPending(null);
     resolve?.(approved);
   }, []);
 
-  // Hold raw mode so keystrokes never echo. While an approval is pending, y/n
-  // answers it (Esc = no + cancel the turn); otherwise Esc cancels the turn.
+  // Keyboard navigation and approval handling.
   useInput(
     (inputChar, key) => {
       if (resolvePendingRef.current) {
-        // Ignore buffered type-ahead for a beat so a keystroke meant for the
-        // previous input can't blind-answer a prompt the user hasn't seen yet,
-        // and ignore modified keys (Ctrl/Alt+Y arrive as a bare 'y').
         if (Date.now() - pendingSinceRef.current < 350) return;
         if (key.ctrl || key.meta) return;
+
         const ch = inputChar.toLowerCase();
-        if (ch === 'y') resolvePending(true);
-        else if (ch === 'n') resolvePending(false);
-        else if (key.escape) {
+
+        if (ch === 'y') {
+          resolvePending(true);
+        } else if (ch === 'n') {
+          resolvePending(false);
+        } else if (key.escape) {
           resolvePending(false);
           abortRef.current?.abort();
         }
+
         return;
       }
-      if (key.escape) abortRef.current?.abort();
+
+      if (key.escape) {
+        abortRef.current?.abort();
+        return;
+      }
+
+      // Scrolling is available when the input is empty.
+      if (input.length === 0) {
+        const pageSize = Math.max(3, (process.stdout.rows ?? 24) - 6);
+
+        if (key.pageUp || (key.ctrl && inputChar.toLowerCase() === 'u')) {
+          setScrollOffset((current) => current + pageSize);
+        } else if (
+          key.pageDown ||
+          (key.ctrl && inputChar.toLowerCase() === 'd')
+        ) {
+          setScrollOffset((current) => Math.max(0, current - pageSize));
+        } else if (key.upArrow) {
+          setScrollOffset(Number.MAX_SAFE_INTEGER);
+        } else if (key.downArrow) {
+          setScrollOffset(0);
+        }
+      }
     },
-    { isActive: isRawModeSupported },
+    { isActive: isRawModeSupported }
   );
 
-  // Re-render on terminal resize so the full-height layout tracks the window.
+  // Terminal resize handling.
   const [, bumpResize] = useState(0);
+
   useEffect(() => {
     const onResize = (): void => bumpResize((n) => n + 1);
+
     process.stdout.on('resize', onResize);
+
     return () => {
       process.stdout.off('resize', onResize);
     };
   }, []);
-  const rows = process.stdout.rows ?? 24;
 
-  // --- display updates driven by the agent loop -----------------------------
+  const rows = process.stdout.rows ?? 24;
+  const columns = process.stdout.columns ?? 80;
+
+  const fixedRows = 5 + (pending || busy ? 1 : 0);
+  const conversationRows = Math.max(1, rows - fixedRows);
+
+  // Calculate approximate height of each conversation turn.
+  const turnHeights = turns.map((turn) =>
+    estimateTurnRows(turn, columns)
+  );
+
+  const totalConversationRows = turnHeights.reduce(
+    (sum, height) => sum + height,
+    0
+  );
+
+  const maxScrollOffset = Math.max(
+    0,
+    totalConversationRows - conversationRows
+  );
+
+  const effectiveScrollOffset = Math.min(
+    scrollOffset,
+    maxScrollOffset
+  );
+
+  // Determine the visible conversation turns from the bottom upwards.
+  let endIndex = turns.length;
+  let rowsFromBottom = 0;
+
+  while (
+    endIndex > 0 &&
+    rowsFromBottom < effectiveScrollOffset
+  ) {
+    rowsFromBottom += turnHeights[endIndex - 1];
+    endIndex--;
+  }
+
+  let startIndex = endIndex;
+  let visibleRows = rowsFromBottom;
+
+  while (
+    startIndex > 0 &&
+    visibleRows < conversationRows
+  ) {
+    startIndex--;
+    visibleRows += turnHeights[startIndex];
+  }
+
+  const visibleTurns = turns.slice(startIndex, endIndex);
+  const isBrowsingHistory = effectiveScrollOffset > 0;
+
+  // Agent output handling.
   const appendText = useCallback((delta: string): void => {
     const cleanDelta = sanitizeText(delta);
+
     setTurns((prev) => {
       const last = prev[prev.length - 1];
+
       if (last?.role === 'assistant' && last.streaming) {
         const next = [...prev];
-        next[next.length - 1] = { ...last, content: last.content + cleanDelta };
+
+        next[next.length - 1] = {
+          ...last,
+          content: last.content + cleanDelta,
+        };
+
         return next;
       }
-      return [...prev, { role: 'assistant', content: cleanDelta, streaming: true }];
+
+      return [
+        ...prev,
+        {
+          role: 'assistant',
+          content: cleanDelta,
+          streaming: true,
+        },
+      ];
     });
   }, []);
 
   const finalizeAssistant = useCallback((): void => {
     setTurns((prev) => {
       const last = prev[prev.length - 1];
+
       if (last?.role === 'assistant' && last.streaming) {
-        if (last.content === '') return prev.slice(0, -1); // drop an empty reply
+        if (last.content === '') return prev.slice(0, -1);
+
         const next = [...prev];
-        next[next.length - 1] = { ...last, streaming: false };
+
+        next[next.length - 1] = {
+          ...last,
+          streaming: false,
+        };
+
         return next;
       }
+
       return prev;
     });
   }, []);
 
-  // Returns a promise the agent loop awaits; it resolves when the user answers
-  // the approval prompt (see useInput above).
   const confirm = useCallback(
     (req: {
       tool: string;
@@ -377,18 +494,30 @@ export function App({ provider, warning }: Props): React.ReactElement {
     }): Promise<boolean> =>
       new Promise<boolean>((resolve) => {
         pendingSinceRef.current = Date.now();
-        setPending({ tool: req.tool, args: req.args });
+
+        setPending({
+          tool: req.tool,
+          args: req.args,
+        });
+
         resolvePendingRef.current = resolve;
       }),
-    [],
+    []
   );
 
   const onSubmit = useCallback(
     async (raw: string): Promise<void> => {
       if (busyRef.current) return;
+
       const text = sanitizeText(raw.trim());
+
       setInput('');
+
       if (text === '') return;
+
+      // Return to the latest message when sending a new prompt.
+      setScrollOffset(0);
+
       if (text === '/exit' || text === '/quit') {
         exit();
         return;
@@ -396,27 +525,50 @@ export function App({ provider, warning }: Props): React.ReactElement {
 
       busyRef.current = true;
       setBusy(true);
+
       const controller = new AbortController();
       abortRef.current = controller;
 
-      setTurns((prev) => [...prev, { role: 'user', content: text }]);
-      history.current.push({ role: 'user', content: text });
-      // Compact history if it exceeds the context window
-      if (estimateHistoryTokens(history.current) > CONTEXT_WINDOW_TOKENS * 0.9) {
+      setTurns((prev) => [
+        ...prev,
+        {
+          role: 'user',
+          content: text,
+        },
+      ]);
+
+      history.current.push({
+        role: 'user',
+        content: text,
+      });
+
+      if (
+        estimateHistoryTokens(history.current) >
+        CONTEXT_WINDOW_TOKENS * 0.9
+      ) {
         history.current = compactHistory(history.current) as Message[];
       }
 
       const events: AgentEvents = {
         onText: appendText,
+
         onToolCall: (name, args) => {
           finalizeAssistant();
+
           setTurns((prev) => [
             ...prev,
-            { role: 'tool-call', content: sanitizeText(`${name}(${compactArgs(args)})`) },
+            {
+              role: 'tool-call',
+              content: sanitizeText(`${name}(${compactArgs(args)})`),
+            },
           ]);
         },
+
         onToolResult: (_name, result, isError) => {
-          const safeResult = isError ? result : summarize(result);
+          const safeResult = isError
+            ? result
+            : summarize(result);
+
           setTurns((prev) => [
             ...prev,
             {
@@ -426,44 +578,97 @@ export function App({ provider, warning }: Props): React.ReactElement {
             },
           ]);
         },
+
         confirm,
       };
 
       try {
-        await runAgent(provider, history.current, events, controller.signal);
+        await runAgent(
+          provider,
+          history.current,
+          events,
+          controller.signal
+        );
+
         finalizeAssistant();
+
         if (controller.signal.aborted) {
           dropIncompleteTail(history.current);
-          setTurns((prev) => [...prev, { role: 'system', content: sanitizeText('[cancelled]') }]);
+
+          setTurns((prev) => [
+            ...prev,
+            {
+              role: 'system',
+              content: sanitizeText('[cancelled]'),
+            },
+          ]);
         }
       } catch (err) {
         finalizeAssistant();
-        dropIncompleteTail(history.current); // stay valid, keep completed writes
-        const msg = err instanceof Error ? err.message : String(err);
-        setTurns((prev) => [...prev, { role: 'system', content: sanitizeText(`⚠ ${msg}`) }]);
+        dropIncompleteTail(history.current);
+
+        const msg =
+          err instanceof Error ? err.message : String(err);
+
+        setTurns((prev) => [
+          ...prev,
+          {
+            role: 'system',
+            content: sanitizeText(`⚠ ${msg}`),
+          },
+        ]);
       } finally {
-        if (resolvePendingRef.current) resolvePending(false);
+        if (resolvePendingRef.current) {
+          resolvePending(false);
+        }
+
         abortRef.current = null;
         busyRef.current = false;
         setBusy(false);
       }
     },
-    [provider, exit, appendText, finalizeAssistant, confirm, resolvePending],
+    [
+      provider,
+      exit,
+      appendText,
+      finalizeAssistant,
+      confirm,
+      resolvePending,
+    ]
   );
 
   return (
     <Box flexDirection="column" height={rows}>
+      {/* Conversation viewport */}
       <Box
         flexDirection="column"
         flexGrow={1}
+        flexShrink={1}
+        height={conversationRows}
+        overflow="hidden"
       >
-        {turns.map((turn, index) => (
-          <TurnView key={index} turn={turn} />
+        {visibleTurns.map((turn, index) => (
+          <TurnView
+            key={startIndex + index}
+            turn={turn}
+          />
         ))}
+
+        {isBrowsingHistory ? (
+          <Text color="yellow" dimColor>
+            ↑ Browsing history · PageUp/PageDown · ↓ to return
+          </Text>
+        ) : null}
       </Box>
 
+      {/* Approval and activity indicators */}
       {pending ? (
-        <Box flexShrink={0} borderStyle="round" borderColor="yellow" paddingX={1}>
+        <Box
+          flexShrink={0}
+          borderStyle="round"
+          borderColor="yellow"
+          paddingX={1}
+        >
           <ApprovalPrompt pending={pending} />
         </Box>
       ) : busy ? (
@@ -474,6 +679,7 @@ export function App({ provider, warning }: Props): React.ReactElement {
         </Box>
       ) : null}
 
+      {/* Input */}
       <Box
         flexShrink={0}
         borderStyle="round"
@@ -482,16 +688,23 @@ export function App({ provider, warning }: Props): React.ReactElement {
       >
         <Box>
           <Text color="cyan">❯ </Text>
+
           <TextInput
             value={input}
-            onChange={(v) => setInput(v.replace(/[\r\n]+/g, ' '))}
+            onChange={(v) =>
+              setInput(v.replace(/[\r\n]+/g, ' '))
+            }
             onSubmit={onSubmit}
             placeholder="type a message · /exit to quit"
           />
         </Box>
       </Box>
 
-      <StatusBar tokenCount={contextTokenCount} maxTokens={CONTEXT_WINDOW_TOKENS} />
+      {/* Context status */}
+      <StatusBar
+        tokenCount={contextTokenCount}
+        maxTokens={CONTEXT_WINDOW_TOKENS}
+      />
     </Box>
   );
 }
@@ -501,16 +714,38 @@ interface StatusBarProps {
   maxTokens: number;
 }
 
-function StatusBar({ tokenCount, maxTokens }: StatusBarProps): React.ReactElement {
+function StatusBar({
+  tokenCount,
+  maxTokens,
+}: StatusBarProps): React.ReactElement {
   const tokenK = Math.floor(tokenCount / 1000);
   const maxK = Math.floor(maxTokens / 1000);
-  // Calculate percentage for potential color coding
-  const percentage = Math.min(100, Math.floor((tokenCount / maxTokens) * 100));
+
+  const percentage = Math.min(
+    100,
+    Math.floor((tokenCount / maxTokens) * 100)
+  );
+
   return (
     <Box flexShrink={0} paddingX={1} paddingY={0}>
-      <Box flexDirection="row" justifyContent="space-between" width="100%">
-        <Text color="white" dimColor>{process.cwd()}</Text>
-        <Text color={percentage > 80 ? 'yellow' : percentage > 60 ? 'cyan' : 'white'}> 
+      <Box
+        flexDirection="row"
+        justifyContent="space-between"
+        width="100%"
+      >
+        <Text color="white" dimColor>
+          {process.cwd()}
+        </Text>
+
+        <Text
+          color={
+            percentage > 80
+              ? 'yellow'
+              : percentage > 60
+                ? 'cyan'
+                : 'white'
+          }
+        >
           context: {tokenCount}/{maxTokens} ({tokenK}k/{maxK}k)
         </Text>
       </Box>
@@ -523,19 +758,32 @@ function ApprovalPrompt({
 }: {
   pending: PendingApproval;
 }): React.ReactElement {
-  const rawPath = typeof pending.args.path === 'string' ? pending.args.path : '?';
-  const path = sanitize(normalize(rawPath)); // the resolved, un-spoofable path
+  const rawPath =
+    typeof pending.args.path === 'string'
+      ? pending.args.path
+      : '?';
+
+  const path = sanitize(normalize(rawPath));
+
   const content =
-    typeof pending.args.content === 'string' ? pending.args.content : '';
+    typeof pending.args.content === 'string'
+      ? pending.args.content
+      : '';
+
   const lines = content.split('\n');
+
   const preview = lines
     .slice(0, 8)
-    .map((line) => sanitize(line.slice(0, 500)).slice(0, 200));
+    .map((line) =>
+      sanitize(line.slice(0, 500)).slice(0, 200)
+    );
+
   return (
     <Box flexDirection="column">
       <Text color="yellowBright" bold>
         🔐 polvo wants to {pending.tool.replace(/_/g, ' ')}
       </Text>
+
       {pending.tool === 'write_file' ? (
         <Box flexDirection="column">
           <Text color="white">
@@ -545,13 +793,17 @@ function ApprovalPrompt({
               {lines.length === 1 ? '' : 's'})
             </Text>
           </Text>
+
           {preview.map((line, i) => (
             <Text key={i} color="gray">
               │ {line}
             </Text>
           ))}
+
           {lines.length > preview.length ? (
-            <Text color="gray">│ … (+{lines.length - preview.length} more)</Text>
+            <Text color="gray">
+              │ … (+{lines.length - preview.length} more)
+            </Text>
           ) : null}
         </Box>
       ) : (
@@ -559,22 +811,30 @@ function ApprovalPrompt({
           {sanitize(JSON.stringify(pending.args)).slice(0, 300)}
         </Text>
       )}
+
       <Text>
         apply?{' '}
         <Text color="greenBright" bold>
           y
         </Text>
+
         <Text color="gray"> = yes · </Text>
+
         <Text color="red" bold>
           n
         </Text>
+
         <Text color="gray"> = no · Esc = cancel turn</Text>
       </Text>
     </Box>
   );
 }
 
-function TurnView({ turn }: { turn: Turn }): React.ReactElement {
+function TurnView({
+  turn,
+}: {
+  turn: Turn;
+}): React.ReactElement {
   switch (turn.role) {
     case 'header':
       return (
@@ -584,34 +844,57 @@ function TurnView({ turn }: { turn: Turn }): React.ReactElement {
           </Text>
         </Box>
       );
+
     case 'system':
       return (
         <Box marginBottom={1}>
-          <Text color="yellow">{sanitizeText(turn.content)}</Text>
+          <Text color="yellow">
+            {sanitizeText(turn.content)}
+          </Text>
         </Box>
       );
+
     case 'tool-call':
       return (
         <Box marginBottom={1}>
-          <Text color="blueBright">🔧 {sanitizeText(turn.content)}</Text>
+          <Text color="blueBright">
+            🔧 {sanitizeText(turn.content)}
+          </Text>
         </Box>
       );
+
     case 'tool-result':
       return (
         <Box marginBottom={1}>
-          <Text color={turn.error ? 'red' : 'gray'}>✓ </Text>
-          <Box>{renderMarkdown(sanitizeText(turn.content))}</Box>
+          <Text color={turn.error ? 'red' : 'gray'}>
+            ✓{' '}
+          </Text>
+
+          <Box>
+            {renderMarkdown(sanitizeText(turn.content))}
+          </Box>
         </Box>
       );
+
     default: {
       const isUser = turn.role === 'user';
+
       const body =
-        turn.content !== '' ? sanitizeText(turn.content) : turn.streaming ? '…' : '';
+        turn.content !== ''
+          ? sanitizeText(turn.content)
+          : turn.streaming
+            ? '…'
+            : '';
+
       return (
         <Box flexDirection="column" marginBottom={1}>
-          <Text color={isUser ? 'cyan' : 'green'} bold>
+          <Text
+            color={isUser ? 'cyan' : 'green'}
+            bold
+          >
             {isUser ? 'you' : '🐙 polvo'}
           </Text>
+
           {isUser ? (
             <Text>{body}</Text>
           ) : (
