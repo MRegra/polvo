@@ -22,8 +22,6 @@ env:
 while running:
   /exit, /quit       leave   ·   Ctrl-C also quits`;
 
-// A bad flag (unknown option, stray positional, bare -m) throws from parseArgs;
-// turn that into a clean usage message instead of a raw Node stack trace.
 function parse(): { model?: string; help?: boolean; version?: boolean } {
   try {
     return parseArgs({
@@ -50,7 +48,6 @@ if (values.version) {
   process.exit(0);
 }
 
-// The TUI needs a real terminal; a pipe (echo … | polvo) can't run raw mode.
 if (!process.stdin.isTTY) {
   console.error(
     'polvo needs an interactive terminal (a TTY) — run it directly, not piped.',
@@ -61,7 +58,19 @@ if (!process.stdin.isTTY) {
 const config = loadConfig(values.model);
 const warning = await checkOllama(config.model);
 const provider = new OllamaProvider(config.model, config.system);
-
 const app = render(createElement(App, { provider, warning }));
-await app.waitUntilExit();
-process.exit(0); // don't linger if a request is still open (e.g. Ctrl-C mid-reply)
+
+try {
+  await app.waitUntilExit();
+} finally {
+  // The Ollama daemon is separate from Polvo. Explicitly unload only the
+  // model this Polvo instance used; do not terminate the shared daemon.
+  try {
+    await provider.unload();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`\nCould not unload Ollama model: ${message}`);
+  }
+}
+
+process.exitCode = 0;

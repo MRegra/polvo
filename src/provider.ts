@@ -8,14 +8,14 @@ export interface ToolCall {
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
-  tool_calls?: ToolCall[]; // on assistant turns that call tools
-  tool_name?: string; // on tool-result turns
+  tool_calls?: ToolCall[];
+  tool_name?: string;
 }
 
 export interface ToolSchema {
   name: string;
   description: string;
-  parameters: Record<string, unknown>; // JSON schema for the tool's args
+  parameters: Record<string, unknown>;
 }
 
 export interface ChatResult {
@@ -23,11 +23,6 @@ export interface ChatResult {
   toolCalls: ToolCall[];
 }
 
-/**
- * A model backend. One call = one model response, which is either text, a set
- * of tool calls, or both. The agent loop (src/agent.ts) drives the tools; the
- * provider only knows how to talk to the model.
- */
 export interface Provider {
   readonly name: string;
   readonly model: string;
@@ -37,10 +32,15 @@ export interface Provider {
     onText: (delta: string) => void,
     signal?: AbortSignal,
   ): Promise<ChatResult>;
+  unload?(): Promise<void>;
 }
 
 const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
 const NUM_CTX = 200_000;
+
+function normalizeHost(host: string): string {
+  return ( /^https?:\/\//.test(host) ? host : `http://${host}` ).replace(/\/$/, '');
+}
 
 function toOllama(m: Message): OllamaMessage {
   const msg: OllamaMessage = { role: m.role, content: m.content };
@@ -56,16 +56,17 @@ function toOllama(m: Message): OllamaMessage {
 export class OllamaProvider implements Provider {
   readonly name = 'ollama';
   private readonly client: Ollama;
-  // The in-flight turn's abort signal, read by the custom fetch below so Esc
-  // cancels the HTTP request itself — including while the model is still
-  // loading, before the first token (ollama-js takes no per-request signal).
+  private readonly host: string;
   private activeSignal?: AbortSignal;
+  private hasUsedModel = false;
 
   constructor(
     readonly model: string,
     private readonly system: string,
     host: string = DEFAULT_HOST,
   ) {
+    this.host = normalizeHost(host);
+
     const fetchWithSignal = (
       input: Parameters<typeof fetch>[0],
       init: RequestInit = {},
@@ -75,7 +76,8 @@ export class OllamaProvider implements Provider {
       if (extra) signal = signal ? AbortSignal.any([signal, extra]) : extra;
       return fetch(input, { ...init, signal });
     };
-    this.client = new Ollama({ host, fetch: fetchWithSignal });
+
+    this.client = new Ollama({ host: this.host, fetch: fetchWithSignal });
   }
 
   async chat(
@@ -85,8 +87,10 @@ export class OllamaProvider implements Provider {
     signal?: AbortSignal,
   ): Promise<ChatResult> {
     this.activeSignal = signal;
+    this.hasUsedModel = true;
     const toolCalls: ToolCall[] = [];
     let text = '';
+
     try {
       const ollamaTools: Tool[] = tools.map((t) => ({
         type: 'function',
@@ -123,30 +127,47 @@ export class OllamaProvider implements Provider {
         }
         if (part.done && part.done_reason === 'length') truncated = true;
       }
-      // Surface a cut-off reply in the UI without polluting the model's history.
+
       if (truncated) onText('\n[truncated: hit the context limit]');
       return { text, toolCalls };
     } catch (err) {
-      if (signal?.aborted) return { text, toolCalls }; // abort is not an error
+      if (signal?.aborted) return { text, toolCalls };
       throw err;
     } finally {
       this.activeSignal = undefined;
     }
   }
+
+  /** Ask the Ollama daemon to unload this model without stopping the daemon. */
+  async unload(): Promise<void> {
+    if (!this.hasUsedModel) return;
+
+    const response = await fetch(`${this.host}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: this.model,
+        prompt: '',
+        keep_alive: 0,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama unload request failed: HTTP ${response.status}`);
+    }
+
+    // Consume the response body so the request is fully completed.
+    await response.text();
+  }
 }
 
-/**
- * Preflight: is Ollama reachable, and is the model present? Returns a
- * human-readable warning, or null when all is well. Never throws.
- */
 export async function checkOllama(
   model: string,
   host: string = DEFAULT_HOST,
 ): Promise<string | null> {
   try {
-    const baseUrl = (
-      /^https?:\/\//.test(host) ? host : `http://${host}`
-    ).replace(/\/$/, '');
+    const baseUrl = normalizeHost(host);
     const res = await fetch(`${baseUrl}/api/tags`);
     if (!res.ok) return `Ollama at ${host} responded ${res.status}`;
     const data = (await res.json()) as { models?: Array<{ name: string }> };
