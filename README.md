@@ -130,6 +130,32 @@ WantedBy=timers.target
 Inside the TUI, ask "why is my RAM high?" — the model calls `system_snapshot`
 and explains the same data.
 
+## Evals: measure, don't guess
+
+`evals/tasks/` holds small real tasks (fix a bug, add a flag, rename across
+files, answer from the code, implement to tests …). Each has a fixture `repo/`,
+a `task.json` prompt, a **hidden** `check.mjs` the model never sees, and a
+reference `solution/` (the unit tests prove every check fails as shipped and
+passes with the solution).
+
+```bash
+npm run eval -- --model qwen3-coder:30b            # all tasks
+npm run eval -- --model llama3.1:8b --tasks fix-json,add-flag
+```
+
+The runner builds polvo, runs `polvo run --yes --json` on a fresh copy of each
+fixture, scores it with the hidden check and writes
+`evals/results/<date>-<model>.json` (pass rate, steps, tool errors, seconds).
+Change one thing — prompt, tool, model, context size — and compare runs.
+
+RAM safety: it refuses to load a model that doesn't fit in available memory
+plus `--headroom-gb` (default 4), and a watchdog kills the run and unloads the
+model if free memory drops below `--min-free-gb` (default 3).
+
+`polvo run [--yes] [--json] "<task>"` is also usable on its own: without `--yes`
+it can only read; `--yes` approves file edits and checks but still declines
+commands that would need approval.
+
 ## Layout
 
 | File | Role |
@@ -144,6 +170,8 @@ and explains the same data.
 | `src/monitor.ts`  | system collectors + threshold rules |
 | `src/provider.ts` | Ollama provider (no fetch timeouts; Esc cancels) |
 | `src/config.ts`   | CLI > env > `.polvo.json` > defaults; system prompt |
+| `src/headless.ts` | `polvo run`: one turn without the TUI (scripts, evals) |
+| `evals/`          | task suite + runner (`npm run eval`) |
 | `src/update.ts`   | `polvo update`: safe fast-forward + rebuild of the install checkout |
 | `src/version.ts`  | version read from `package.json` (the only place to bump) |
 | `scripts/install.sh` | installer: prerequisites, build, `npm link` |

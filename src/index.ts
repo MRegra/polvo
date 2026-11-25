@@ -9,6 +9,7 @@ import { OllamaProvider, checkOllama } from './provider.js';
 import { App } from './app.js';
 import { collectSnapshot, evaluate, formatReport } from './monitor.js';
 import { update } from './update.js';
+import { runHeadless } from './headless.js';
 import { REPO_DIR, VERSION } from './version.js';
 
 const USAGE = `polvo — a terminal coding agent (v${VERSION})
@@ -17,6 +18,10 @@ usage: polvo [options]
        polvo monitor [--json]   check this machine (no model needed);
                                 exits 1 on a warning, 2 on a critical alert
        polvo update [--check]   pull the latest master and rebuild
+       polvo run [--yes] [--json] "<task>"
+                                one turn without the TUI. Without --yes it can
+                                only read; --yes approves file edits and checks
+                                (never commands that would need approval)
 
 options:
   -m, --model <id>   Ollama model to use (default: $POLVO_MODEL or qwen3-coder:30b)
@@ -40,7 +45,7 @@ while running:
   /exit, /quit       leave   ·   Ctrl-C also quits`;
 
 function parse(): {
-  values: { model?: string; help?: boolean; version?: boolean; json?: boolean; check?: boolean };
+  values: { model?: string; help?: boolean; version?: boolean; json?: boolean; check?: boolean; yes?: boolean };
   positionals: string[];
 } {
   try {
@@ -48,6 +53,7 @@ function parse(): {
       allowPositionals: true,
       options: {
         check: { type: 'boolean' },
+        yes: { type: 'boolean', short: 'y' },
         model: { type: 'string', short: 'm' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -92,6 +98,45 @@ if (positionals[0] === 'monitor') {
   const alerts = evaluate(snapshot);
   console.log(values.json ? JSON.stringify({ alerts, ...snapshot }, null, 2) : formatReport(snapshot, alerts));
   process.exit(alerts.some((a) => a.level === 'critical') ? 2 : alerts.length ? 1 : 0);
+}
+if (positionals[0] === 'run') {
+  const prompt = positionals.slice(1).join(' ').trim();
+  if (!prompt) {
+    console.error('usage: polvo run [--yes] [--json] "<task>"');
+    process.exit(2);
+  }
+  let runConfig: Config;
+  try {
+    runConfig = loadConfig(values.model);
+  } catch (err) {
+    console.error(`polvo: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(2);
+  }
+  const problem = await checkOllama(runConfig.model);
+  if (problem) {
+    console.error(`polvo: ${problem}`);
+    process.exit(2);
+  }
+  const runProvider = new OllamaProvider(runConfig.model, runConfig.system, {
+    numCtx: runConfig.numCtx,
+    keepAlive: runConfig.keepAlive,
+  });
+  const controller = new AbortController();
+  process.once('SIGINT', () => controller.abort());
+  const result = await runHeadless(runProvider, runConfig, prompt, {
+    yes: values.yes === true,
+    signal: controller.signal,
+    onText: values.json ? undefined : (d) => process.stdout.write(d),
+  });
+  if (values.json) {
+    console.log(JSON.stringify({ model: runConfig.model, ...result }));
+  } else {
+    process.stdout.write('\n');
+    for (const n of result.notices) console.error(`· ${n}`);
+    if (result.error) console.error(`⚠ ${result.error}`);
+  }
+  const checksFailed = result.checks.length > 0 && !result.checks.slice(-runConfig.checks.length).every((c) => c.ok);
+  process.exit(result.status === 'error' || checksFailed ? 1 : 0);
 }
 if (positionals.length > 0) {
   console.error(`unknown command: ${positionals[0]}\n\n${USAGE}`);

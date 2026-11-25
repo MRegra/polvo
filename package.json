@@ -14,7 +14,8 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
-    "test": "node --import tsx --test test/*.test.ts test/*.test.tsx"
+    "test": "node --import tsx --test test/*.test.ts test/*.test.tsx",
+    "eval": "tsx evals/run.ts"
   },
   "license": "MIT",
   "devDependencies": {

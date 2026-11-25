@@ -1,0 +1,1 @@
+{ "prompt": "The tests in test.mjs fail. Find the bug in range.mjs and fix it. Don't change the tests." }

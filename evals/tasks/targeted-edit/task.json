@@ -1,0 +1,1 @@
+{ "prompt": "In shapes.mjs, the area of a triangle is wrong: it should be half of base times height. Fix only the triangle; leave the other shapes exactly as they are." }

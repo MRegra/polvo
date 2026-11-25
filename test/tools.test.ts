@@ -71,3 +71,12 @@ test('edits keep the file mode', async () => {
   await run('edit_file', { path: 'run.sh', old_string: 'hi', new_string: 'bye' });
   assert.equal(statSync('run.sh').mode & 0o777, 0o750);
 });
+
+test('write_file refuses to blank out an existing file', async () => {
+  writeFileSync('cfg.json', '{"a": 1}');
+  await run('read_file', { path: 'cfg.json' });
+  await assert.rejects(run('write_file', { path: 'cfg.json', content: '' }), /empty content/);
+  await assert.rejects(run('write_file', { path: 'cfg.json', content: '  \n' }), /empty content/);
+  assert.equal(readFileSync('cfg.json', 'utf8'), '{"a": 1}');
+  assert.match(await run('write_file', { path: 'new-empty.txt', content: '' }), /created/);
+});
