@@ -8,12 +8,15 @@ import { loadConfig, type Config } from './config.js';
 import { OllamaProvider, checkOllama } from './provider.js';
 import { App } from './app.js';
 import { collectSnapshot, evaluate, formatReport } from './monitor.js';
+import { update } from './update.js';
+import { REPO_DIR, VERSION } from './version.js';
 
-const USAGE = `polvo — a terminal coding agent (v0.4.0)
+const USAGE = `polvo — a terminal coding agent (v${VERSION})
 
 usage: polvo [options]
        polvo monitor [--json]   check this machine (no model needed);
                                 exits 1 on a warning, 2 on a critical alert
+       polvo update [--check]   pull the latest master and rebuild
 
 options:
   -m, --model <id>   Ollama model to use (default: $POLVO_MODEL or qwen3-coder:30b)
@@ -37,13 +40,14 @@ while running:
   /exit, /quit       leave   ·   Ctrl-C also quits`;
 
 function parse(): {
-  values: { model?: string; help?: boolean; version?: boolean; json?: boolean };
+  values: { model?: string; help?: boolean; version?: boolean; json?: boolean; check?: boolean };
   positionals: string[];
 } {
   try {
     return parseArgs({
       allowPositionals: true,
       options: {
+        check: { type: 'boolean' },
         model: { type: 'string', short: 'm' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -67,10 +71,22 @@ if (values.help) {
 }
 
 if (values.version) {
-  console.log('polvo 0.4.0');
+  console.log(`polvo ${VERSION}`);
   process.exit(0);
 }
 
+if (positionals[0] === 'update') {
+  try {
+    const r = update(REPO_DIR, { check: values.check, log: (l) => console.log(l) });
+    if (r.status === 'up-to-date') console.log(`polvo ${r.version} is up to date`);
+    else if (r.status === 'available') console.log(`${r.behind} new commit(s) on master — run: polvo update`);
+    else console.log(`polvo ${r.from} → ${r.to} (${r.commits} commit${r.commits === 1 ? '' : 's'})`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`polvo update: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
 if (positionals[0] === 'monitor') {
   const snapshot = await collectSnapshot();
   const alerts = evaluate(snapshot);
