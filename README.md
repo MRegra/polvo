@@ -77,6 +77,15 @@ Per project, `.polvo.json` (all optional):
 Checks are your own shell commands; polvo asks you to approve them once per
 session (a cloned repo can ship a `.polvo.json` too).
 
+polvo's own repo ships one (typecheck + tests), so when you point polvo at its
+own code, its changes are only "done" once those pass. Do that in a separate
+worktree so the installed command keeps running `master`:
+
+```bash
+git -C ~/dev/polvo worktree add ../polvo-dev -b my-change
+cd ~/dev/polvo-dev && npm ci && polvo
+```
+
 ## Memory
 
 RAM ≈ model weights + KV cache. For `qwen3-coder:30b` on CPU: ~18 GB of weights
