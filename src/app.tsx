@@ -18,7 +18,9 @@ import type { AgentEvents } from './agent.js';
 import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
-import { SYSTEM_PROMPT } from './config.js';
+import { SYSTEM_PROMPT, type Config } from './config.js';
+import { estimateMessages, estimateTokens } from './context.js';
+import { parseCommand } from './command.js';
 
 // Explicit hex colors: ANSI 'gray' and dimColor (faint) are nearly invisible
 // on many dark terminal themes.
@@ -44,6 +46,7 @@ interface PendingApproval {
 interface Props {
   provider: Provider;
   warning?: string | null;
+  config: Pick<Config, 'maxSteps' | 'checks' | 'maxFixAttempts'>;
 }
 interface ViewportSegment {
   text: string;
@@ -78,45 +81,6 @@ function sanitizePromptInput(s: string): string {
     .replace(/(?:\u001b)?\[?<\d+;\d+;\d+[mM]/g, '')
     // Keep the prompt single-line.
     .replace(/[\r\n]+/g, ' ');
-}
-function estimateTokens(text: string): number {
-  return Math.floor(text.trim().length / 4);
-}
-const CONTEXT_WINDOW_TOKENS = 200_000;
-function estimateHistoryTokens(history: Message[]): number {
-  let total = 0;
-  for (const msg of history) {
-    total += estimateTokens(msg.content);
-  }
-  return total;
-}
-function compactHistory(
-  history: Message[],
-  maxTokens: number = CONTEXT_WINDOW_TOKENS,
-): Message[] {
-  let totalTokens = 0;
-  for (const msg of history) {
-    totalTokens += estimateTokens(msg.content);
-  }
-  if (totalTokens <= maxTokens) {
-    return history;
-  }
-  const result: Message[] = [];
-  let currentTokens = 0;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const msg = history[i];
-    const msgTokens = estimateTokens(msg.content);
-    if (msg.role === 'system') {
-      result.unshift(msg);
-      currentTokens += msgTokens;
-      continue;
-    }
-    if (currentTokens + msgTokens <= maxTokens) {
-      result.unshift(msg);
-      currentTokens += msgTokens;
-    }
-  }
-  return result;
 }
 function dropIncompleteTail(history: Message[]): void {
   let i = history.length - 1;
@@ -301,7 +265,7 @@ function buildViewportLines(
         addPlain(turn.content, 'magenta', true);
         break;
       case 'system':
-        addMarkdown(turn.content, 'yellow');
+        addMarkdown(turn.content, turn.error ? 'red' : 'yellow');
         break;
       case 'user':
         addPlain('you:', 'cyan', true);
@@ -385,7 +349,7 @@ function BrandHeader({
 }: {
   provider: Provider;
 }): React.ReactElement {
-  const version = '0.3.15';
+  const version = '0.4.0';
   const home = process.env.HOME ?? '';
   const cwd = process.cwd();
   const displayPath =
@@ -423,6 +387,7 @@ function BrandHeader({
 export function App({
   provider,
   warning,
+  config,
 }: Props): React.ReactElement {
   const { exit } = useApp();
   const { isRawModeSupported } = useStdin();
@@ -452,11 +417,9 @@ export function App({
   const [contextTokenCount, setContextTokenCount] =
     useState(0);
   useEffect(() => {
-    let count = estimateTokens(SYSTEM_PROMPT);
-    for (const msg of history.current) {
-      count += estimateTokens(msg.content);
-    }
-    setContextTokenCount(count);
+    setContextTokenCount(
+      estimateTokens(SYSTEM_PROMPT) + estimateMessages(history.current),
+    );
   }, [turns]);
   const resolvePending = useCallback(
     (approved: boolean): void => {
@@ -731,6 +694,20 @@ export function App({
         exit();
         return;
       }
+      // /plan <task>: read-only turn — the harness withholds every tool that
+      // changes state, so the model can only explore and propose.
+      const planMatch = /^\/plan(?:\s+(.*))?$/.exec(text);
+      if (planMatch && !planMatch[1]?.trim()) {
+        setTurns((prev) => [
+          ...prev,
+          { role: 'system', content: 'usage: /plan <what you want to build or change>' },
+        ]);
+        return;
+      }
+      const readOnly = planMatch !== null;
+      const prompt = readOnly
+        ? `Plan only — do not change anything yet. Explore what you need, then reply with a short numbered plan (files to touch, steps, how to verify) for: ${planMatch[1]!.trim()}`
+        : text;
       busyRef.current = true;
       setBusy(true);
       const controller = new AbortController();
@@ -744,17 +721,24 @@ export function App({
       ]);
       history.current.push({
         role: 'user',
-        content: text,
+        content: prompt,
       });
-      if (
-        estimateHistoryTokens(history.current) >
-        CONTEXT_WINDOW_TOKENS * 0.9
-      ) {
-        history.current = compactHistory(
-          history.current,
-        ) as Message[];
-      }
+      const notice = (content: string, error = false): void => {
+        finalizeAssistant();
+        setTurns((prev) => [
+          ...prev,
+          { role: 'system', content: sanitizeText(content), error },
+        ]);
+      };
       const events: AgentEvents = {
+        onNotice: (t) => notice(`· ${t}`),
+        onCheck: (r) =>
+          notice(
+            r.ok
+              ? `✓ check passed: ${r.command}`
+              : `✗ check failed: ${r.command} (exit ${r.exitCode ?? 'killed'}) — sent to the model`,
+            !r.ok,
+          ),
         onText: appendText,
         onToolCall: (name, args) => {
           finalizeAssistant();
@@ -789,6 +773,13 @@ export function App({
           history.current,
           events,
           controller.signal,
+          {
+            maxSteps: config.maxSteps,
+            contextTokens: provider.contextTokens,
+            checks: config.checks,
+            maxFixAttempts: config.maxFixAttempts,
+            readOnly,
+          },
         );
         finalizeAssistant();
         if (controller.signal.aborted) {
@@ -826,6 +817,7 @@ export function App({
     },
     [
       provider,
+      config,
       exit,
       appendText,
       finalizeAssistant,
@@ -918,7 +910,7 @@ export function App({
       {/* Context status */}
       <StatusBar
         tokenCount={contextTokenCount}
-        maxTokens={CONTEXT_WINDOW_TOKENS}
+        maxTokens={provider.contextTokens}
       />
     </Box>
   );
@@ -972,6 +964,69 @@ function StatusBar({
 // -----------------------------------------------------------
 // Approval prompt
 // -----------------------------------------------------------
+/**
+ * The command exactly as it will run: parsed argv, each argument quoted if it
+ * isn't plain, never truncated silently — so padding or a long argument can't
+ * hide what follows from the approval prompt.
+ */
+function commandPreview(command: unknown): string {
+  let argv: string[];
+  try {
+    argv = parseCommand(String(command ?? ''));
+  } catch (err) {
+    return `(will fail: ${err instanceof Error ? err.message : String(err)})`;
+  }
+  const shown = argv
+    .map((a) => (/^[\w./:=@%+,-]+$/.test(a) ? a : JSON.stringify(a)))
+    .join(' ');
+  const safe = sanitize(shown);
+  const LIMIT = 2_000;
+  return safe.length <= LIMIT
+    ? safe
+    : `${safe.slice(0, LIMIT)} … [${safe.length - LIMIT} more chars not shown — answer n]`;
+}
+
+const DIFF_LINES = 10;
+
+/** old_string as red "-" lines, new_string as green "+" lines, each capped. */
+function EditPreview({
+  args,
+  path,
+}: {
+  args: Record<string, unknown>;
+  path: string;
+}): React.ReactElement {
+  const side = (value: unknown): string[] =>
+    (typeof value === 'string' ? value : '').split('\n');
+  const render = (lines: string[], sign: '-' | '+'): React.ReactElement[] => {
+    const shown = lines.slice(0, DIFF_LINES).map((line, i) => (
+      <Text key={`${sign}${i}`} color={sign === '-' ? '#F87171' : '#4ADE80'}>
+        {sign} {sanitize(line.slice(0, 500)).slice(0, 200)}
+      </Text>
+    ));
+    if (lines.length > DIFF_LINES) {
+      shown.push(
+        <Text key={`${sign}more`} color={MUTED}>
+          {sign} … (+{lines.length - DIFF_LINES} more lines)
+        </Text>,
+      );
+    }
+    return shown;
+  };
+  return (
+    <Box flexDirection="column">
+      <Text color="white">
+        {path}
+        {args.replace_all === true ? (
+          <Text color={MUTED}> (every occurrence)</Text>
+        ) : null}
+      </Text>
+      {render(side(args.old_string), '-')}
+      {render(side(args.new_string), '+')}
+    </Box>
+  );
+}
+
 function ApprovalPrompt({
   pending,
 }: {
@@ -1017,13 +1072,30 @@ function ApprovalPrompt({
             </Text>
           ) : null}
         </Box>
+      ) : pending.tool === 'edit_file' ? (
+        <EditPreview args={pending.args} path={path} />
+      ) : pending.tool === 'run_command' ? (
+        <Text color="white">$ {commandPreview(pending.args.command)}</Text>
+      ) : pending.tool === 'run_checks' ? (
+        <Box flexDirection="column">
+          <Text color={MUTED}>
+            project checks from .polvo.json (approve once per session):
+          </Text>
+          {(Array.isArray(pending.args.commands) ? pending.args.commands : []).map(
+            (c, i) => (
+              <Text key={i} color="white">
+                $ {sanitize(String(c)).slice(0, 200)}
+              </Text>
+            ),
+          )}
+        </Box>
       ) : (
         <Text color={MUTED}>
           {sanitize(JSON.stringify(pending.args)).slice(0, 300)}
         </Text>
       )}
       <Text>
-        apply?{' '}
+        {pending.tool === 'run_checks' || pending.tool === 'run_command' ? 'run?' : 'apply?'}{' '}
         <Text color="greenBright" bold>
           y
         </Text>

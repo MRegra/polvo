@@ -12,6 +12,8 @@ export interface Message {
   content: string;
   tool_calls?: ToolCall[];
   tool_name?: string;
+  /** Injected by the harness (e.g. a check-failure report), not typed by the user. */
+  synthetic?: boolean;
 }
 
 export interface ToolSchema {
@@ -28,6 +30,8 @@ export interface ChatResult {
 export interface Provider {
   readonly name: string;
   readonly model: string;
+  /** Context window the model runs with (tokens). */
+  readonly contextTokens: number;
   chat(
     messages: Message[],
     tools: ToolSchema[],
@@ -38,7 +42,14 @@ export interface Provider {
 }
 
 const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
-const NUM_CTX = 200_000;
+
+export interface OllamaOptions {
+  /** Context window. Ollama reserves the KV cache for all of it (~94 MB per 1k tokens for qwen3-coder:30b). */
+  numCtx: number;
+  /** Keep the model loaded this long after each request (Ollama duration, "0" unloads). */
+  keepAlive: string;
+  host?: string;
+}
 
 /**
  * Node's built-in fetch gives up after 5 minutes without response headers.
@@ -80,13 +91,20 @@ export class OllamaProvider implements Provider {
   private readonly host: string;
   private activeSignal?: AbortSignal;
   private hasUsedModel = false;
+  readonly contextTokens: number;
+  private readonly keepAlive: string | number;
 
   constructor(
     readonly model: string,
     private readonly system: string,
-    host: string = DEFAULT_HOST,
+    options: OllamaOptions,
   ) {
-    this.host = normalizeHost(host);
+    this.host = normalizeHost(options.host ?? DEFAULT_HOST);
+    this.contextTokens = options.numCtx;
+    // Ollama reads a bare number as seconds; a string must carry a unit.
+    this.keepAlive = /^-?\d+$/.test(options.keepAlive)
+      ? Number(options.keepAlive)
+      : options.keepAlive;
 
     const fetchWithSignal = (
       input: Parameters<typeof fetch>[0],
@@ -134,7 +152,9 @@ export class OllamaProvider implements Provider {
           ...messages.map(toOllama),
         ],
         tools: ollamaTools,
-        options: { num_ctx: NUM_CTX },
+        keep_alive: this.keepAlive,
+        // Keep num_ctx constant: changing it between requests reloads the model.
+        options: { num_ctx: this.contextTokens },
       });
 
       let truncated = false;
