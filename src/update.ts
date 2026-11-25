@@ -55,7 +55,9 @@ export function assertUpdatable(dir: string): void {
   if (branch !== UPDATE_BRANCH) {
     throw new Error(`${dir} is on branch "${branch}", not ${UPDATE_BRANCH} — switch with: git -C ${dir} checkout ${UPDATE_BRANCH}`);
   }
-  if (git(dir, ['status', '--porcelain'])) {
+  // Untracked files (eval results, scratch notes) don't block a fast-forward;
+  // git itself refuses if one would be overwritten. Only real edits do.
+  if (git(dir, ['status', '--porcelain', '--untracked-files=no'])) {
     throw new Error(`${dir} has uncommitted changes — commit or stash them first (git -C ${dir} status)`);
   }
 }

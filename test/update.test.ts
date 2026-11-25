@@ -58,6 +58,12 @@ test('up to date still repairs a missing build', () => {
   assert.equal(builds.length, 1);
 });
 
+test('untracked files (e.g. eval results) do not block an update', () => {
+  release('1.2.0');
+  writeFileSync(join(install, 'eval-result.json'), '{}');
+  assert.equal(update(install, { build: fakeBuild }).status, 'updated');
+});
+
 test('refuses local changes, other branches, and non-polvo directories', () => {
   writeFileSync(join(install, 'package.json'), pkg('9.9.9'));
   assert.throws(() => update(install, { build: fakeBuild }), /uncommitted changes/);
