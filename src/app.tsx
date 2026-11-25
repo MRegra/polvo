@@ -19,8 +19,11 @@ import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
 import { SYSTEM_PROMPT } from './config.js';
-import Image from 'ink-picture';
-import { fileURLToPath } from 'node:url';
+
+// Explicit hex colors: ANSI 'gray' and dimColor (faint) are nearly invisible
+// on many dark terminal themes.
+const MUTED = '#A0A8B4';
+const CODE = '#E5C07B';
 type Role =
   | 'header'
   | 'system'
@@ -42,11 +45,17 @@ interface Props {
   provider: Provider;
   warning?: string | null;
 }
-interface ViewportLine {
+interface ViewportSegment {
   text: string;
   color: string;
   bold?: boolean;
+  italic?: boolean;
 }
+
+interface ViewportLine {
+  segments: ViewportSegment[];
+}
+
 function compactArgs(args: Record<string, unknown>): string {
   const s = JSON.stringify(args);
   return s.length > 60 ? `${s.slice(0, 57)}…` : s;
@@ -147,107 +156,226 @@ function getCharWidth(char: string): number {
 /**
  * Wrap one logical line into terminal-width-aware display lines.
  */
-function wrapLine(text: string, width: number): string[] {
-  const chars = Array.from(text);
-  if (chars.length === 0) {
-    return [''];
-  }
-  const result: string[] = [];
-  let line = '';
-  let cells = 0;
-  for (const char of chars) {
-    const charWidth = getCharWidth(char);
-    if (cells + charWidth > width && line.length > 0) {
-      result.push(line);
-      line = '';
-      cells = 0;
+function parseInlineMarkdown(
+  input: string,
+  color: string,
+  forceBold = false,
+): ViewportSegment[] {
+  const result: ViewportSegment[] = [];
+  const regex = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\*[^*]+\*|_[^_]+_)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  const add = (text: string, style: Partial<ViewportSegment> = {}): void => {
+    if (!text) return;
+    result.push({
+      text,
+      color,
+      bold: forceBold || style.bold,
+      italic: style.italic,
+    });
+  };
+
+  while ((match = regex.exec(input)) !== null) {
+    add(input.slice(lastIndex, match.index));
+    const token = match[0];
+
+    if (token.startsWith('**') || token.startsWith('__')) {
+      add(token.slice(2, -2), { bold: true });
+    } else if (token.startsWith('`')) {
+      result.push({ text: token.slice(1, -1), color: CODE });
+    } else {
+      add(token.slice(1, -1), { italic: true });
     }
-    line += char;
-    cells += charWidth;
+
+    lastIndex = regex.lastIndex;
   }
-  if (line.length > 0) {
-    result.push(line);
-  }
+
+  add(input.slice(lastIndex));
   return result;
 }
+
+function pushStyledSegment(
+  line: ViewportSegment[],
+  text: string,
+  style: ViewportSegment,
+): void {
+  if (!text) return;
+  const previous = line[line.length - 1];
+
+  if (
+    previous &&
+    previous.color === style.color &&
+    previous.bold === style.bold &&
+    previous.italic === style.italic
+  ) {
+    previous.text += text;
+  } else {
+    line.push({ ...style, text });
+  }
+}
+
+function wrapStyledSegments(
+  segments: ViewportSegment[],
+  width: number,
+): ViewportLine[] {
+  const result: ViewportLine[] = [];
+  let current: ViewportSegment[] = [];
+  let cells = 0;
+
+  const flush = (): void => {
+    result.push({ segments: current });
+    current = [];
+    cells = 0;
+  };
+
+  for (const segment of segments) {
+    for (const char of Array.from(segment.text)) {
+      const charWidth = getCharWidth(char);
+      if (cells + charWidth > width && cells > 0) flush();
+      pushStyledSegment(current, char, segment);
+      cells += charWidth;
+    }
+  }
+
+  if (current.length > 0 || result.length === 0) flush();
+  return result;
+}
+
 /**
- * Convert conversation turns into a flat array of display lines.
- * This is the source of truth for viewport height and scroll position.
+ * Convert turns into styled terminal lines. Formatting stays attached
+ * to segments while the viewport scrolls over the flattened line list.
  */
 function buildViewportLines(
   turns: Turn[],
   width: number,
 ): ViewportLine[] {
   const lines: ViewportLine[] = [];
-  const add = (
+
+  const addPlain = (
     content: string,
     color: string,
     bold = false,
   ): void => {
-    for (const rawLine of content.split(/\r?\n/)) {
-      const clean = sanitizeText(rawLine);
-      for (const wrapped of wrapLine(clean, width)) {
-        lines.push({
-          text: wrapped,
-          color,
-          bold,
-        });
-      }
+    for (const raw of content.split(/\r?\n/)) {
+      lines.push(
+        ...wrapStyledSegments(
+          [{ text: sanitizeText(raw), color, bold }],
+          width,
+        ),
+      );
     }
   };
+
+  const addMarkdown = (content: string, color = 'white'): void => {
+    let inCodeBlock = false;
+
+    for (const raw of content.split(/\r?\n/)) {
+      if (/^\s*```/.test(raw)) {
+        inCodeBlock = !inCodeBlock;
+        continue;
+      }
+
+      const clean = sanitizeText(raw);
+      if (inCodeBlock) {
+        lines.push(
+          ...wrapStyledSegments([{ text: clean, color: MUTED }], width),
+        );
+        continue;
+      }
+
+      const heading = clean.match(/^\s{0,3}#{1,6}\s+(.*)$/);
+      const text = heading ? heading[1] : clean;
+      lines.push(
+        ...wrapStyledSegments(
+          parseInlineMarkdown(text, color, Boolean(heading)),
+          width,
+        ),
+      );
+    }
+  };
+
   for (const turn of turns) {
     switch (turn.role) {
       case 'header':
-        add(turn.content, 'magenta', true);
+        addPlain(turn.content, 'magenta', true);
         break;
       case 'system':
-        add(turn.content, 'yellow');
+        addMarkdown(turn.content, 'yellow');
         break;
       case 'user':
-        add('you:', 'cyan', true);
-        add(turn.content, 'white');
+        addPlain('you:', 'cyan', true);
+        addMarkdown(turn.content);
         break;
       case 'assistant':
-        add('🐙 polvo:', 'green', true);
-        add(
-          turn.content || (turn.streaming ? '…' : ''),
-          'white',
-        );
+        addPlain('🐙 polvo:', 'green', true);
+        addMarkdown(turn.content || (turn.streaming ? '…' : ''));
         break;
       case 'tool-call':
-        add(`🔧 ${turn.content}`, 'blueBright');
+        addPlain(`🔧 ${turn.content}`, 'blueBright');
         break;
       case 'tool-result':
-        add(
-          `✓ ${turn.content}`,
-          turn.error ? 'red' : 'gray',
-        );
+        addMarkdown(`✓ ${turn.content}`, turn.error ? 'red' : MUTED);
         break;
     }
-    // Spacing between conversation turns.
-    lines.push({
-      text: '',
-      color: 'white',
-    });
+
+    lines.push({ segments: [{ text: ' ', color: 'white' }] });
   }
+
   return lines;
 }
 
 
-const octopusImage = fileURLToPath(
-  new URL('../assets/polvo-octopus-pink.png', import.meta.url)
-);
+/**
+ * Hand-drawn logo, rendered two pixels per cell with half blocks (▀ ▄).
+ * '.' = transparent, P = pink, W = white, K = pupil. Keep the row count even.
+ */
+const OCTOPUS = [
+  '....PPPPPP....',
+  '..PPPPPPPPPP..',
+  '.PPPPPPPPPPPP.',
+  '.PPWWPPPPWWPP.',
+  '.PPWKPPPPWKPP.',
+  '.PPPPPPPPPPPP.',
+  '..PPPPPPPPPP..',
+  '.PPPPPPPPPPPP.',
+  '.PP.PP..PP.PP.',
+  'PP..PP..PP..PP',
+  'P..PP....PP..P',
+  '.PP........PP.',
+];
+
+const OCTOPUS_COLORS: Record<string, string | undefined> = {
+  P: '#FF75A8',
+  W: '#FFFFFF',
+  K: '#1E1E28',
+};
 
 function OctopusLogo(): React.ReactElement {
+  const rows = Array.from({ length: OCTOPUS.length / 2 }, (_, i) => i * 2);
   return (
-    <Box flexShrink={0}>
-      <Image
-        src={octopusImage}
-        width={14}
-        height={6}
-        objectFit="contain"
-        alt="Polvo octopus mascot"
-      />
+    <Box flexDirection="column" flexShrink={0}>
+      {rows.map((y) => (
+        <Text key={y}>
+          {[...OCTOPUS[y]].map((topKey, x) => {
+            const top = OCTOPUS_COLORS[topKey];
+            const bottom = OCTOPUS_COLORS[OCTOPUS[y + 1][x]];
+            if (!top && !bottom) return <Text key={x}> </Text>;
+            if (!top) {
+              return (
+                <Text key={x} color={bottom}>
+                  ▄
+                </Text>
+              );
+            }
+            return (
+              <Text key={x} color={top} backgroundColor={bottom}>
+                ▀
+              </Text>
+            );
+          })}
+        </Text>
+      ))}
     </Box>
   );
 }
@@ -260,12 +388,10 @@ function BrandHeader({
   const version = '0.3.15';
   const home = process.env.HOME ?? '';
   const cwd = process.cwd();
-
   const displayPath =
     home && cwd.startsWith(home)
       ? `~${cwd.slice(home.length)}`
       : cwd;
-
   return (
     <Box
       flexDirection="row"
@@ -276,7 +402,6 @@ function BrandHeader({
       flexShrink={0}
     >
       <OctopusLogo />
-
       <Box
         flexDirection="column"
         justifyContent="center"
@@ -285,11 +410,9 @@ function BrandHeader({
         <Text color="white" bold>
           Polvo <Text color="#9299A3">v{version}</Text>
         </Text>
-
         <Text color="#D1D5DB">
           {provider.model}
         </Text>
-
         <Text color="#9299A3">
           {displayPath}
         </Text>
@@ -297,7 +420,6 @@ function BrandHeader({
     </Box>
   );
 }
-
 export function App({
   provider,
   warning,
@@ -720,7 +842,6 @@ export function App({
       height={rows}
     >
       <BrandHeader provider={provider} />
-
       {/* Conversation viewport */}
       <Box
         flexDirection="column"
@@ -730,12 +851,17 @@ export function App({
         overflow="hidden"
       >
         {visibleLines.map((line, index) => (
-          <Text
-            key={viewportStart + index}
-            color={line.color}
-            bold={line.bold}
-          >
-            {line.text || ' '}
+          <Text key={viewportStart + index}>
+            {line.segments.map((segment, segmentIndex) => (
+              <Text
+                key={segmentIndex}
+                color={segment.color}
+                bold={segment.bold}
+                italic={segment.italic}
+              >
+                {segment.text}
+              </Text>
+            ))}
           </Text>
         ))}
       </Box>
@@ -745,7 +871,7 @@ export function App({
           flexShrink={0}
           paddingX={1}
         >
-          <Text color="yellow" dimColor>
+          <Text color="yellow">
             ↑ Browsing history · PageUp/PageDown · ↓ to return
           </Text>
         </Box>
@@ -825,7 +951,7 @@ function StatusBar({
         justifyContent="space-between"
         width="100%"
       >
-        <Text color="white" dimColor>
+        <Text color={MUTED}>
           {process.cwd()}
         </Text>
         <Text
@@ -875,24 +1001,24 @@ function ApprovalPrompt({
         <Box flexDirection="column">
           <Text color="white">
             {path}{' '}
-            <Text color="gray">
+            <Text color={MUTED}>
               ({content.length} chars, {lines.length} line
               {lines.length === 1 ? '' : 's'})
             </Text>
           </Text>
           {preview.map((line, i) => (
-            <Text key={i} color="gray">
+            <Text key={i} color={MUTED}>
               │ {line}
             </Text>
           ))}
           {lines.length > preview.length ? (
-            <Text color="gray">
+            <Text color={MUTED}>
               │ … (+{lines.length - preview.length} more)
             </Text>
           ) : null}
         </Box>
       ) : (
-        <Text color="gray">
+        <Text color={MUTED}>
           {sanitize(JSON.stringify(pending.args)).slice(0, 300)}
         </Text>
       )}
@@ -901,11 +1027,11 @@ function ApprovalPrompt({
         <Text color="greenBright" bold>
           y
         </Text>
-        <Text color="gray"> = yes · </Text>
+        <Text color={MUTED}> = yes · </Text>
         <Text color="red" bold>
           n
         </Text>
-        <Text color="gray">
+        <Text color={MUTED}>
           {' '}= no · Esc = cancel turn
         </Text>
       </Text>

@@ -12,8 +12,6 @@ export interface AgentEvents {
   }): Promise<boolean>;
 }
 
-const MAX_STEPS = 1000;
-
 /**
  * Run one user turn to completion: call the model, run any tools it asks for,
  * feed the results back, and loop until it replies with no tool calls. Tools
@@ -26,8 +24,9 @@ export async function runAgent(
   history: Message[],
   events: AgentEvents,
   signal?: AbortSignal,
+  maxSteps: number = 1000,
 ): Promise<void> {
-  for (let step = 0; step < MAX_STEPS; step++) {
+  for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) return;
 
     const { text, toolCalls } = await provider.chat(

@@ -1,4 +1,6 @@
 import { Ollama, type Message as OllamaMessage, type Tool } from 'ollama';
+import { Agent, fetch as undiciFetch } from 'undici';
+import { logDiagnostic } from './diagnostics.js';
 
 export interface ToolCall {
   name: string;
@@ -38,6 +40,25 @@ export interface Provider {
 const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
 const NUM_CTX = 200_000;
 
+/**
+ * Node's built-in fetch gives up after 5 minutes without response headers.
+ * Ollama sends no headers until the first token, and on CPU a long prompt can
+ * take longer than that to process, so the request died with "fetch failed".
+ * Disable those timeouts; Esc still cancels through the AbortSignal.
+ */
+const noTimeoutAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+
+/** "fetch failed" hides the real reason in err.cause — surface it. */
+export function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = err.cause;
+  if (cause instanceof Error) {
+    const code = (cause as { code?: string }).code;
+    return `${err.message}: ${cause.message}${code ? ` (${code})` : ''}`;
+  }
+  return err.message;
+}
+
 function normalizeHost(host: string): string {
   return ( /^https?:\/\//.test(host) ? host : `http://${host}` ).replace(/\/$/, '');
 }
@@ -74,7 +95,11 @@ export class OllamaProvider implements Provider {
       const extra = this.activeSignal;
       let signal = init.signal ?? undefined;
       if (extra) signal = signal ? AbortSignal.any([signal, extra]) : extra;
-      return fetch(input, { ...init, signal });
+      return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+        ...(init as Parameters<typeof undiciFetch>[1]),
+        signal,
+        dispatcher: noTimeoutAgent,
+      }) as unknown as Promise<Response>;
     };
 
     this.client = new Ollama({ host: this.host, fetch: fetchWithSignal });
@@ -132,7 +157,12 @@ export class OllamaProvider implements Provider {
       return { text, toolCalls };
     } catch (err) {
       if (signal?.aborted) return { text, toolCalls };
-      throw err;
+      await logDiagnostic('provider.chat', err, {
+        model: this.model,
+        host: this.host,
+        messages: messages.length,
+      });
+      throw new Error(describeError(err), { cause: err });
     } finally {
       this.activeSignal = undefined;
     }
