@@ -286,7 +286,16 @@ const writeFileTool: Tool = {
     rejectTruncationMarker(args.content);
     const path = String(args.path);
     const { abs, exists } = await writableTarget(args.path);
-    if (exists) await requireFreshRead(abs, path);
+    if (exists) {
+      await requireFreshRead(abs, path);
+      // Wiping a file is almost never the intent; weak models do it by
+      // accident (calling write_file with no content) and then report success.
+      if (args.content.trim() === '' && (await stat(abs)).size > 0) {
+        throw new Error(
+          `refusing to replace ${path} with empty content — to change part of it use edit_file; write_file needs the complete new contents`,
+        );
+      }
+    }
     await atomicWrite(abs, args.content);
     const lines = args.content.split('\n').length;
     return `${exists ? 'overwrote' : 'created'} ${path} (${lines} line${lines === 1 ? '' : 's'})`;

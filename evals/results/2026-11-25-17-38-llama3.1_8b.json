@@ -1,0 +1,103 @@
+{
+  "model": "llama3.1:8b",
+  "numCtx": 16384,
+  "date": "2026-11-25T17:38:15.368Z",
+  "passed": 0,
+  "total": 8,
+  "totalSteps": 25,
+  "totalSeconds": 689,
+  "results": [
+    {
+      "task": "add-flag",
+      "pass": false,
+      "reason": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:",
+      "steps": 2,
+      "toolCalls": 1,
+      "toolErrors": 1,
+      "checksRun": 0,
+      "declined": [],
+      "durationS": 72
+    },
+    {
+      "task": "answer-question",
+      "pass": false,
+      "reason": "if (!/\\b8137\\b/.test(text)) throw new Error(`answer was: ${text.slice(0, 200)}`);",
+      "steps": 2,
+      "toolCalls": 1,
+      "toolErrors": 0,
+      "checksRun": 0,
+      "declined": [
+        "run_command"
+      ],
+      "durationS": 34
+    },
+    {
+      "task": "create-module",
+      "pass": false,
+      "reason": "SyntaxError: missing ) after argument list",
+      "steps": 2,
+      "toolCalls": 1,
+      "toolErrors": 0,
+      "checksRun": 0,
+      "declined": [],
+      "durationS": 44
+    },
+    {
+      "task": "fix-json",
+      "pass": false,
+      "reason": "AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:",
+      "steps": 3,
+      "toolCalls": 4,
+      "toolErrors": 1,
+      "checksRun": 0,
+      "declined": [],
+      "durationS": 65
+    },
+    {
+      "task": "fix-off-by-one",
+      "pass": false,
+      "reason": "node:internal/errors:984",
+      "steps": 3,
+      "toolCalls": 3,
+      "toolErrors": 1,
+      "checksRun": 0,
+      "declined": [],
+      "durationS": 81
+    },
+    {
+      "task": "implement-to-tests",
+      "pass": false,
+      "reason": "node:internal/errors:984",
+      "steps": 6,
+      "toolCalls": 7,
+      "toolErrors": 4,
+      "checksRun": 1,
+      "declined": [],
+      "durationS": 281
+    },
+    {
+      "task": "rename-function",
+      "pass": false,
+      "reason": "AssertionError [ERR_ASSERTION]: main.mjs still mentions calc_total",
+      "steps": 2,
+      "toolCalls": 1,
+      "toolErrors": 1,
+      "checksRun": 0,
+      "declined": [],
+      "durationS": 54
+    },
+    {
+      "task": "targeted-edit",
+      "pass": false,
+      "reason": "SyntaxError: Invalid or unexpected token",
+      "steps": 5,
+      "toolCalls": 4,
+      "toolErrors": 1,
+      "checksRun": 0,
+      "declined": [
+        "run_command"
+      ],
+      "durationS": 58
+    }
+  ]
+}

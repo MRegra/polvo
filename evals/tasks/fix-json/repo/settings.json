@@ -1,0 +1,6 @@
+{
+  "name": "demo",
+  "retries": 3,
+  "features": ["search", "export",],
+  "timeouts": { "connect": 5, "read": 30 }
+}

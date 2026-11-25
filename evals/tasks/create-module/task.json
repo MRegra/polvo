@@ -1,0 +1,1 @@
+{ "prompt": "Create slugify.mjs exporting a function slugify(text): lower-case, trim, replace every run of non-alphanumeric characters with a single hyphen, and strip leading/trailing hyphens. Example: slugify('  Hello, World! ') === 'hello-world'." }
