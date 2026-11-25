@@ -21,6 +21,7 @@ import { normalize } from 'node:path';
 import { SYSTEM_PROMPT, type Config } from './config.js';
 import { estimateMessages, estimateTokens } from './context.js';
 import { parseCommand } from './command.js';
+import { VERSION } from './version.js';
 
 // Explicit hex colors: ANSI 'gray' and dimColor (faint) are nearly invisible
 // on many dark terminal themes.
@@ -349,7 +350,7 @@ function BrandHeader({
 }: {
   provider: Provider;
 }): React.ReactElement {
-  const version = '0.4.0';
+  const version = VERSION;
   const home = process.env.HOME ?? '';
   const cwd = process.cwd();
   const displayPath =

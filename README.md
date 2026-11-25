@@ -20,11 +20,41 @@ not left to the model:
 | Context never overflows | tool output capped (head+tail); history trimmed before every model call, in one batch, at turn boundaries |
 | Plans before big changes | `/plan <task>` runs a read-only turn: write tools are withheld, not just discouraged |
 
+## Install
+
+Needs git, Node.js ≥ 20 and [Ollama](https://ollama.com) with a model pulled
+(`ollama pull qwen3-coder:30b`).
+
+```bash
+# fresh machine: clones into ~/.local/share/polvo (override with POLVO_DIR)
+curl -fsSL https://raw.githubusercontent.com/MRegra/polvo/master/scripts/install.sh | bash
+
+# or from a checkout you already have
+git clone https://github.com/MRegra/polvo.git && cd polvo
+./scripts/install.sh
+```
+
+The script checks the prerequisites, runs `npm ci` and the build, and `npm link`s
+a global `polvo` command that points into the checkout. With nvm, the link
+belongs to the active Node version — run the script again after switching.
+
+## Update
+
+```bash
+polvo update --check   # is there anything new on master?
+polvo update           # git pull --ff-only, npm ci, build
+```
+
+`polvo update` works on the checkout polvo runs from. It refuses when that
+checkout has uncommitted changes or is not on `master` (it would be your work),
+and if the new build fails it rolls back to the previous commit so the command
+keeps working. Uninstall with `npm unlink -g polvo`.
+
 ## Run it
 
 ```bash
-npm install
-npm run dev                  # the TUI, in the current directory
+polvo                        # the TUI, in the current directory
+npm run dev                  # same, straight from the sources (no build)
 polvo --model qwen3:8b       # smaller/faster model
 polvo monitor                # system check, no model needed (exit 0 ok · 1 warn · 2 critical)
 polvo monitor --json
@@ -105,9 +135,13 @@ and explains the same data.
 | `src/monitor.ts`  | system collectors + threshold rules |
 | `src/provider.ts` | Ollama provider (no fetch timeouts; Esc cancels) |
 | `src/config.ts`   | CLI > env > `.polvo.json` > defaults; system prompt |
+| `src/update.ts`   | `polvo update`: safe fast-forward + rebuild of the install checkout |
+| `src/version.ts`  | version read from `package.json` (the only place to bump) |
+| `scripts/install.sh` | installer: prerequisites, build, `npm link` |
 
-`npm test` runs the unit tests (`test/`, node:test); CI runs typecheck, tests and
-build on Node 20 and 22.
+`npm test` runs the unit tests (`test/`, node:test); CI runs typecheck, tests,
+build and shellcheck on Node 20 and 22. To release, bump `version` in
+`package.json` only.
 
 ## Next
 
