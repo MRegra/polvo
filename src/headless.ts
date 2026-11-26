@@ -1,7 +1,7 @@
 import { runAgent, type AgentEvents } from './agent.js';
 import type { Config } from './config.js';
 import { estimateMessages } from './context.js';
-import type { Message, Provider } from './provider.js';
+import type { ChatUsage, Message, Provider } from './provider.js';
 
 /**
  * `polvo run "<task>"`: one agent turn with no TUI — for scripts, timers and
@@ -23,13 +23,15 @@ export interface HeadlessResult {
   text: string;
   /** Model calls made. */
   steps: number;
-  toolCalls: Array<{ name: string; error: boolean }>;
+  toolCalls: Array<{ name: string; error: boolean; detail?: string }>;
   checks: Array<{ command: string; ok: boolean }>;
   declined: string[];
   notices: string[];
   /** Estimated tokens in the final history. */
   contextTokens: number;
   durationMs: number;
+  /** Accumulated Ollama token/timing metrics across steps, when reported. */
+  usage?: ChatUsage;
 }
 
 const AUTO_APPROVE_WITH_YES = new Set(['edit_file', 'write_file', 'run_checks']);
@@ -45,14 +47,24 @@ export async function runHeadless(
     status: 'ok', text: '', steps: 0, toolCalls: [], checks: [], declined: [], notices: [],
     contextTokens: 0, durationMs: 0,
   };
+  const usage: ChatUsage = { promptTokens: 0, outputTokens: 0, promptEvalMs: 0, evalMs: 0 };
+  let hasUsage = false;
   // Count model calls without touching the agent loop.
   const counted: Provider = {
     name: provider.name,
     model: provider.model,
     contextTokens: provider.contextTokens,
-    chat: (...args) => {
+    chat: async (...args) => {
       result.steps++;
-      return provider.chat(...args);
+      const chatResult = await provider.chat(...args);
+      if (chatResult.usage) {
+        hasUsage = true;
+        usage.promptTokens += chatResult.usage.promptTokens;
+        usage.outputTokens += chatResult.usage.outputTokens;
+        usage.promptEvalMs += chatResult.usage.promptEvalMs;
+        usage.evalMs += chatResult.usage.evalMs;
+      }
+      return chatResult;
     },
   };
   let finalText = '';
@@ -64,7 +76,8 @@ export async function runHeadless(
     onToolCall: () => {
       finalText = ''; // keep only the text after the last tool call: the answer
     },
-    onToolResult: (name, _r, isError) => result.toolCalls.push({ name, error: isError }),
+    onToolResult: (name, r, isError) =>
+      result.toolCalls.push(isError ? { name, error: true, detail: r.slice(0, 160) } : { name, error: false }),
     confirm: async ({ tool }) => {
       const ok = options.yes && AUTO_APPROVE_WITH_YES.has(tool);
       if (!ok) result.declined.push(tool);
@@ -88,5 +101,6 @@ export async function runHeadless(
   result.text = finalText.trim();
   result.contextTokens = estimateMessages(history);
   result.durationMs = Date.now() - started;
+  if (hasUsage) result.usage = usage;
   return result;
 }

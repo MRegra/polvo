@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { createElement } from 'react';
 import { render } from 'ink';
@@ -18,6 +19,8 @@ usage: polvo [options]
        polvo monitor [--json]   check this machine (no model needed);
                                 exits 1 on a warning, 2 on a critical alert
        polvo update [--check]   pull the latest master and rebuild
+       polvo eval [options]     run the benchmark suite (alias: benchmark)
+                                --quick (3 key tasks), --test (run npm test first)
        polvo run [--yes] [--json] "<task>"
                                 one turn without the TUI. Without --yes it can
                                 only read; --yes approves file edits and checks
@@ -69,6 +72,40 @@ function parse(): {
   }
 }
 
+const EVAL_USAGE = `usage: polvo eval [options]   (alias: polvo benchmark)
+
+options:
+  --quick              run only the 3 key tasks (answer-question, implement-to-tests, rename-function)
+  --test               run npm run typecheck && npm test before the eval
+  --tasks <a,b>        comma-separated task names
+  --model <id>         Ollama model (default: $POLVO_MODEL or qwen3-coder:30b)
+  --num-ctx <n>        context window (default: 16384)
+  --kv-cache <type>    f16 | q8_0 | q4_0 (default: $POLVO_KV_CACHE or f16)
+  --min-free-gb <n>    abort if available RAM drops below this (default: 3)
+  --headroom-gb <n>    required free RAM headroom before loading (default: 4)
+  --timeout-min <n>    per-task timeout in minutes (default: 20)`;
+
+if (process.argv[2] === 'eval' || process.argv[2] === 'benchmark') {
+  const rest = process.argv.slice(3);
+  if (rest.includes('-h') || rest.includes('--help')) {
+    console.log(EVAL_USAGE);
+    process.exit(0);
+  }
+  const runTestsFirst = rest.includes('--test');
+  const forwarded = rest.filter((a) => a !== '--test');
+  if (runTestsFirst) {
+    const tc = spawnSync('npm', ['run', 'typecheck'], { cwd: REPO_DIR, stdio: 'inherit' });
+    if (tc.status !== 0) process.exit(tc.status ?? 1);
+    const t = spawnSync('npm', ['test'], { cwd: REPO_DIR, stdio: 'inherit' });
+    if (t.status !== 0) process.exit(t.status ?? 1);
+  }
+  const ev = spawnSync('npm', ['run', '--silent', 'eval', '--', ...forwarded], {
+    cwd: REPO_DIR,
+    stdio: 'inherit',
+  });
+  process.exit(ev.status ?? 1);
+}
+
 const { values, positionals } = parse();
 
 if (values.help) {
@@ -117,9 +154,18 @@ if (positionals[0] === 'run') {
     console.error(`polvo: ${problem}`);
     process.exit(2);
   }
-  const runProvider = new OllamaProvider(runConfig.model, runConfig.system, {
+  const headlessNotes = values.yes
+    ? [
+        'Running non-interactively with --yes: file edits/writes are approved, but do NOT call run_command to run node, npm, or tests — non-read-only commands are blocked in headless mode and will be declined.',
+        ...(runConfig.checks.length
+          ? [`Project checks (${runConfig.checks.join(', ')}) run automatically after you finish editing files — do not call run_command to run them yourself.`]
+          : []),
+      ]
+    : ['Running non-interactively (read-only): file edits and non-read-only commands will be declined.'];
+  const runProvider = new OllamaProvider(runConfig.model, `${runConfig.system}\n\n${headlessNotes.join('\n')}`, {
     numCtx: runConfig.numCtx,
     keepAlive: runConfig.keepAlive,
+    modelOptions: runConfig.modelOptions,
   });
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
@@ -161,6 +207,7 @@ const warning = await checkOllama(config.model);
 const provider = new OllamaProvider(config.model, config.system, {
   numCtx: config.numCtx,
   keepAlive: config.keepAlive,
+  modelOptions: config.modelOptions,
 });
 
 const app = render(

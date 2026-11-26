@@ -22,9 +22,17 @@ export interface ToolSchema {
   parameters: Record<string, unknown>;
 }
 
+export interface ChatUsage {
+  promptTokens: number;
+  outputTokens: number;
+  promptEvalMs: number;
+  evalMs: number;
+}
+
 export interface ChatResult {
   text: string;
   toolCalls: ToolCall[];
+  usage?: ChatUsage;
 }
 
 export interface Provider {
@@ -43,12 +51,22 @@ export interface Provider {
 
 const DEFAULT_HOST = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434';
 
+export interface ModelOptions {
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  repeat_penalty?: number;
+  num_predict?: number;
+}
+
 export interface OllamaOptions {
   /** Context window. Ollama reserves the KV cache for all of it (~94 MB per 1k tokens for qwen3-coder:30b). */
   numCtx: number;
   /** Keep the model loaded this long after each request (Ollama duration, "0" unloads). */
   keepAlive: string;
   host?: string;
+  /** Optional sampling / generation parameters passed to Ollama. */
+  modelOptions?: ModelOptions;
 }
 
 /**
@@ -85,6 +103,37 @@ function toOllama(m: Message): OllamaMessage {
   return msg;
 }
 
+const DEFAULT_NUM_PREDICT = 4096;
+const IDLE_TIMEOUT_MS = 180_000;
+
+/**
+ * Some local models (e.g. Qwen3-Coder) occasionally emit XML-style tool calls
+ * (`<function=name><parameter=k>v</parameter></function></tool_call>`) in
+ * `content` when Ollama's server-side parser misses them. Recover them so the
+ * turn doesn't exit prematurely with 0 tool calls.
+ */
+export function parseFallbackToolCalls(text: string): { text: string; toolCalls: ToolCall[] } {
+  const toolCalls: ToolCall[] = [];
+  const fnRe = /(?:<tool_call>\s*)?<function=([A-Za-z_][\w-]*)>([\s\S]*?)<\/function>(?:\s*<\/tool_call>)?/g;
+  const paramRe = /<parameter=([A-Za-z_][\w-]*)>([\s\S]*?)<\/parameter>/g;
+  const cleaned = text.replace(fnRe, (_full, name: string, body: string) => {
+    const args: Record<string, unknown> = {};
+    for (const m of body.matchAll(paramRe)) {
+      const key = m[1]!;
+      let val = m[2]!;
+      if (val.startsWith('\n')) val = val.slice(1);
+      if (val.endsWith('\n')) val = val.slice(0, -1);
+      if (val === 'true') args[key] = true;
+      else if (val === 'false') args[key] = false;
+      else if (/^\d+$/.test(val) && key === 'start_line') args[key] = Number(val);
+      else args[key] = val;
+    }
+    toolCalls.push({ name, args });
+    return '';
+  });
+  return { text: cleaned.trimEnd(), toolCalls };
+}
+
 export class OllamaProvider implements Provider {
   readonly name = 'ollama';
   private readonly client: Ollama;
@@ -93,6 +142,7 @@ export class OllamaProvider implements Provider {
   private hasUsedModel = false;
   readonly contextTokens: number;
   private readonly keepAlive: string | number;
+  private readonly modelOptions: ModelOptions;
 
   constructor(
     readonly model: string,
@@ -101,6 +151,7 @@ export class OllamaProvider implements Provider {
   ) {
     this.host = normalizeHost(options.host ?? DEFAULT_HOST);
     this.contextTokens = options.numCtx;
+    this.modelOptions = options.modelOptions ?? {};
     // Ollama reads a bare number as seconds; a string must carry a unit.
     this.keepAlive = /^-?\d+$/.test(options.keepAlive)
       ? Number(options.keepAlive)
@@ -129,7 +180,15 @@ export class OllamaProvider implements Provider {
     onText: (delta: string) => void,
     signal?: AbortSignal,
   ): Promise<ChatResult> {
-    this.activeSignal = signal;
+    const idle = new AbortController();
+    let timedOut = false;
+    const armIdle = (): ReturnType<typeof setTimeout> =>
+      setTimeout(() => {
+        timedOut = true;
+        idle.abort();
+      }, IDLE_TIMEOUT_MS);
+    let idleTimer = armIdle();
+    this.activeSignal = signal ? AbortSignal.any([signal, idle.signal]) : idle.signal;
     this.hasUsedModel = true;
     const toolCalls: ToolCall[] = [];
     let text = '';
@@ -154,11 +213,15 @@ export class OllamaProvider implements Provider {
         tools: ollamaTools,
         keep_alive: this.keepAlive,
         // Keep num_ctx constant: changing it between requests reloads the model.
-        options: { num_ctx: this.contextTokens },
+        // Cap num_predict by default so a runaway CPU generation can't stall for 20 min.
+        options: { num_predict: DEFAULT_NUM_PREDICT, ...this.modelOptions, num_ctx: this.contextTokens },
       });
 
       let truncated = false;
+      let usage: ChatUsage | undefined;
       for await (const part of response) {
+        clearTimeout(idleTimer);
+        idleTimer = armIdle();
         const delta = part.message?.content ?? '';
         if (delta) {
           text += delta;
@@ -170,13 +233,32 @@ export class OllamaProvider implements Provider {
             args: (call.function.arguments ?? {}) as Record<string, unknown>,
           });
         }
-        if (part.done && part.done_reason === 'length') truncated = true;
+        if (part.done) {
+          if (part.done_reason === 'length') truncated = true;
+          usage = {
+            promptTokens: part.prompt_eval_count ?? 0,
+            outputTokens: part.eval_count ?? 0,
+            promptEvalMs: Math.round((part.prompt_eval_duration ?? 0) / 1e6),
+            evalMs: Math.round((part.eval_duration ?? 0) / 1e6),
+          };
+        }
+      }
+
+      if (toolCalls.length === 0 && text.includes('<function=')) {
+        const recovered = parseFallbackToolCalls(text);
+        if (recovered.toolCalls.length > 0) {
+          text = recovered.text;
+          toolCalls.push(...recovered.toolCalls);
+        }
       }
 
       if (truncated) onText('\n[truncated: hit the context limit]');
-      return { text, toolCalls };
+      return usage ? { text, toolCalls, usage } : { text, toolCalls };
     } catch (err) {
       if (signal?.aborted) return { text, toolCalls };
+      if (timedOut) {
+        throw new Error(`Ollama stopped responding for ${IDLE_TIMEOUT_MS / 1000}s`, { cause: err });
+      }
       await logDiagnostic('provider.chat', err, {
         model: this.model,
         host: this.host,
@@ -184,6 +266,7 @@ export class OllamaProvider implements Provider {
       });
       throw new Error(describeError(err), { cause: err });
     } finally {
+      clearTimeout(idleTimer);
       this.activeSignal = undefined;
     }
   }

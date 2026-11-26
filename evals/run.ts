@@ -2,8 +2,9 @@
  * Eval suite: run polvo headless on small real tasks and score it with hidden
  * checks, so a harness/prompt/model change can be judged by numbers.
  *
- *   npm run eval -- [--model qwen3-coder:30b] [--tasks fix-json,add-flag]
+ *   npm run eval -- [--model qwen3-coder:30b] [--tasks fix-json,add-flag] [--quick]
  *                   [--num-ctx 16384] [--timeout-min 20] [--min-free-gb 3]
+ *                   [--headroom-gb 4] [--kv-cache f16|q8_0|q4_0]
  *
  * RAM safety (other programs must keep running): before loading a model it
  * checks the model fits in MemAvailable with headroom, and a watchdog aborts
@@ -30,17 +31,19 @@ export interface CheckOutcome {
 /** Run a task's hidden check against a work dir. The model's answer is in <workDir>/.output. */
 export function runCheck(taskDir: string, workDir: string): Promise<CheckOutcome> {
   return new Promise((done) => {
+    const env = { ...process.env, NO_COLOR: '1' };
+    delete env.FORCE_COLOR;
     execFile(
       process.execPath,
       [join(taskDir, 'check.mjs'), workDir, join(workDir, '.output')],
-      { timeout: 60_000, encoding: 'utf8' },
+      { timeout: 60_000, encoding: 'utf8', env },
       (err, _stdout, stderr) => {
         if (!err) return done({ pass: true });
         // Node prints the source line and a caret first; the "XxxError: message" line is the useful one.
         const lines = stderr.split('\n').map((l) => l.trim());
         const at = lines.findIndex((l) => /^(\w*Error)(\s\[\w+\])?:/.test(l));
-        const msg = at === -1 ? lines.filter(Boolean).pop() : lines.slice(at, at + 3).filter(Boolean).join(' ');
-        done({ pass: false, reason: (msg ?? String(err)).slice(0, 300) });
+        const msg = at === -1 ? lines.filter(Boolean).pop() : lines.slice(at, at + 10).filter(Boolean).join(' ');
+        done({ pass: false, reason: (msg ?? String(err)).slice(0, 600) });
       },
     );
   });
@@ -68,12 +71,16 @@ async function unload(model: string): Promise<void> {
 }
 
 /** Rough RAM the model needs once loaded: weights + KV cache + buffers. */
-async function estimateNeedGB(model: string, numCtx: number): Promise<number> {
+const KV_GB_PER_1K: Record<string, number> = { f16: 0.1, q8_0: 0.05, q4_0: 0.025 };
+
+async function estimateNeedGB(model: string, numCtx: number, kvCache: string): Promise<number> {
+  const perK = KV_GB_PER_1K[kvCache];
+  if (perK === undefined) throw new Error(`--kv-cache must be one of ${Object.keys(KV_GB_PER_1K).join(', ')}`);
   const tags = await ollamaJSON<{ models?: Array<{ name: string; size: number }> }>('/api/tags');
   const entry = tags.models?.find((m) => m.name === model || m.name === `${model}:latest`);
   if (!entry) throw new Error(`model ${model} is not pulled (ollama pull ${model})`);
-  // ~0.1 GB per 1k tokens of context covers qwen3-coder:30b (~0.094) and smaller models.
-  return entry.size / 1e9 + (numCtx / 1000) * 0.1 + 1.5;
+  // f16: ~0.1 GB per 1k tokens of context covers qwen3-coder:30b (~0.094) and smaller models.
+  return entry.size / 1e9 + (numCtx / 1000) * perK + 1.5;
 }
 
 interface TaskResult {
@@ -83,8 +90,13 @@ interface TaskResult {
   steps: number;
   toolCalls: number;
   toolErrors: number;
+  errors?: Array<{ tool: string; message: string }>;
   checksRun: number;
   declined: string[];
+  promptTokens?: number;
+  outputTokens?: number;
+  evalTokPerS?: number;
+  promptEvalS?: number;
   durationS: number;
   error?: string;
 }
@@ -94,9 +106,15 @@ interface Headless {
   error?: string;
   text: string;
   steps: number;
-  toolCalls: Array<{ name: string; error: boolean }>;
+  toolCalls: Array<{ name: string; error: boolean; detail?: string }>;
   checks: unknown[];
   declined: string[];
+  usage?: {
+    promptTokens: number;
+    outputTokens: number;
+    promptEvalMs: number;
+    evalMs: number;
+  };
 }
 
 class LowMemory extends Error {}
@@ -144,15 +162,20 @@ function runPolvo(
   });
 }
 
+const QUICK_TASKS = ['answer-question', 'implement-to-tests', 'rename-function'];
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       model: { type: 'string', default: process.env.POLVO_MODEL ?? 'qwen3-coder:30b' },
       tasks: { type: 'string' },
+      quick: { type: 'boolean', default: false },
       'num-ctx': { type: 'string', default: '16384' },
       'timeout-min': { type: 'string', default: '20' },
       'min-free-gb': { type: 'string', default: '3' },
       'headroom-gb': { type: 'string', default: '4' },
+      // Match the server's OLLAMA_KV_CACHE_TYPE: q8_0 halves the context memory, q4_0 quarters it.
+      'kv-cache': { type: 'string', default: process.env.POLVO_KV_CACHE ?? 'f16' },
     },
   });
   const model = values.model!;
@@ -160,13 +183,17 @@ async function main(): Promise<void> {
   const minFree = Number(values['min-free-gb']);
   const headroom = Number(values['headroom-gb']);
   const all = readdirSync(TASKS_DIR).sort();
-  const wanted = values.tasks ? values.tasks.split(',') : all;
+  const wanted = values.tasks
+    ? values.tasks.split(',')
+    : values.quick
+      ? QUICK_TASKS
+      : all;
   const unknown = wanted.filter((t) => !all.includes(t));
   if (unknown.length) throw new Error(`unknown task(s): ${unknown.join(', ')}`);
 
   const alreadyLoaded = (await loadedModels()).some((m) => m === model || m === `${model}:latest`);
   if (!alreadyLoaded) {
-    const need = await estimateNeedGB(model, numCtx);
+    const need = await estimateNeedGB(model, numCtx, values['kv-cache']!);
     const free = memAvailableGB();
     if (need + headroom > free) {
       throw new Error(
@@ -202,10 +229,26 @@ async function main(): Promise<void> {
         const h = await runPolvo(workDir, prompt, env, Number(values['timeout-min']) * 60_000, minFree);
         writeFileSync(join(workDir, '.output'), h.text);
         const check = await runCheck(taskDir, workDir);
+        const errors = h.toolCalls
+          .filter((c) => c.error)
+          .map((c) => ({ tool: c.name, message: c.detail ?? '' }));
+        const evalTokPerS =
+          h.usage && h.usage.evalMs > 0
+            ? Number(((h.usage.outputTokens / h.usage.evalMs) * 1000).toFixed(1))
+            : undefined;
+        const promptEvalS =
+          h.usage && h.usage.promptEvalMs > 0
+            ? Number((h.usage.promptEvalMs / 1000).toFixed(1))
+            : undefined;
         r = {
           task, pass: check.pass && h.status === 'ok', reason: check.reason, error: h.error,
-          steps: h.steps, toolCalls: h.toolCalls.length, toolErrors: h.toolCalls.filter((c) => c.error).length,
-          checksRun: h.checks.length, declined: h.declined, durationS: Math.round((Date.now() - started) / 1000),
+          steps: h.steps, toolCalls: h.toolCalls.length, toolErrors: errors.length,
+          ...(errors.length ? { errors } : {}),
+          checksRun: h.checks.length, declined: h.declined,
+          ...(h.usage ? { promptTokens: h.usage.promptTokens, outputTokens: h.usage.outputTokens } : {}),
+          ...(evalTokPerS !== undefined ? { evalTokPerS } : {}),
+          ...(promptEvalS !== undefined ? { promptEvalS } : {}),
+          durationS: Math.round((Date.now() - started) / 1000),
         };
       } catch (err) {
         r = {
@@ -221,6 +264,7 @@ async function main(): Promise<void> {
       }
       results.push(r);
       console.log(`${r.pass ? '✓' : '✗'} ${String(r.durationS).padStart(4)}s  steps ${r.steps}  tools ${r.toolCalls} (${r.toolErrors} err)` +
+        (r.evalTokPerS !== undefined ? `  ${r.evalTokPerS} tok/s` : '') +
         (r.pass ? '' : `  — ${(r.error ?? r.reason ?? '').slice(0, 120)}`) + `  [${workDir}]`);
     }
   } finally {
