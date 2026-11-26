@@ -47,7 +47,7 @@ interface PendingApproval {
 interface Props {
   provider: Provider;
   warning?: string | null;
-  config: Pick<Config, 'maxSteps' | 'checks' | 'maxFixAttempts'>;
+  config: Pick<Config, 'maxSteps' | 'checks' | 'maxFixAttempts'> & { system?: string };
 }
 interface ViewportSegment {
   text: string;
@@ -417,11 +417,12 @@ export function App({
   const history = useRef<Message[]>([]);
   const [contextTokenCount, setContextTokenCount] =
     useState(0);
+  const [tokPerS, setTokPerS] = useState<number | null>(null);
   useEffect(() => {
     setContextTokenCount(
-      estimateTokens(SYSTEM_PROMPT) + estimateMessages(history.current),
+      estimateTokens(config.system ?? SYSTEM_PROMPT) + estimateMessages(history.current),
     );
-  }, [turns]);
+  }, [turns, config.system]);
   const resolvePending = useCallback(
     (approved: boolean): void => {
       const resolve = resolvePendingRef.current;
@@ -766,6 +767,9 @@ export function App({
             },
           ]);
         },
+        onUsage: (u) => {
+          if (u.evalMs > 0) setTokPerS(Number(((u.outputTokens / u.evalMs) * 1000).toFixed(1)));
+        },
         confirm,
       };
       try {
@@ -912,6 +916,7 @@ export function App({
       <StatusBar
         tokenCount={contextTokenCount}
         maxTokens={provider.contextTokens}
+        tokPerS={tokPerS}
       />
     </Box>
   );
@@ -922,10 +927,12 @@ export function App({
 interface StatusBarProps {
   tokenCount: number;
   maxTokens: number;
+  tokPerS: number | null;
 }
 function StatusBar({
   tokenCount,
   maxTokens,
+  tokPerS,
 }: StatusBarProps): React.ReactElement {
   const tokenK = Math.floor(tokenCount / 1000);
   const maxK = Math.floor(maxTokens / 1000);
@@ -956,7 +963,7 @@ function StatusBar({
                 : 'white'
           }
         >
-          context: {tokenCount}/{maxTokens} ({tokenK}k/{maxK}k)
+          context: {tokenCount}/{maxTokens} ({tokenK}k/{maxK}k){tokPerS !== null ? ` · ${tokPerS} tok/s` : ''}
         </Text>
       </Box>
     </Box>

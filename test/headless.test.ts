@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { runHeadless } from '../src/headless.ts';
 import { resetCheckApprovals } from '../src/agent.ts';
 import { resetReadState } from '../src/tools.ts';
-import type { ChatResult, Provider } from '../src/provider.ts';
+import { parseFallbackToolCalls, type ChatResult, type Provider } from '../src/provider.ts';
 
 function fake(script: ChatResult[]): Provider {
   return {
@@ -57,4 +57,31 @@ test('provider errors are reported, not thrown', async () => {
   const r = await runHeadless(p, config, 'go', { yes: true });
   assert.equal(r.status, 'error');
   assert.equal(r.error, 'boom');
+});
+
+test('accumulates provider usage and records failed tool details', async () => {
+  const p = fake([
+    {
+      text: '',
+      toolCalls: [{ name: 'read_file', args: { path: 'missing.txt' } }],
+      usage: { promptTokens: 100, outputTokens: 20, promptEvalMs: 200, evalMs: 500 },
+    },
+    {
+      text: 'done',
+      toolCalls: [],
+      usage: { promptTokens: 120, outputTokens: 10, promptEvalMs: 50, evalMs: 250 },
+    },
+  ]);
+  const r = await runHeadless(p, config, 'go', { yes: true });
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.usage, { promptTokens: 220, outputTokens: 30, promptEvalMs: 250, evalMs: 750 });
+  assert.equal(r.toolCalls[0]?.error, true);
+  assert.match(r.toolCalls[0]?.detail ?? '', /missing\.txt/);
+});
+
+test('parseFallbackToolCalls recovers Qwen XML-style tool calls from text', () => {
+  const raw = 'Let me check.\n\n<function=read_file>\n<parameter=path>\nduration.mjs\n</parameter>\n</function>\n</tool_call>';
+  const parsed = parseFallbackToolCalls(raw);
+  assert.equal(parsed.text, 'Let me check.');
+  assert.deepEqual(parsed.toolCalls, [{ name: 'read_file', args: { path: 'duration.mjs' } }]);
 });

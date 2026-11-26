@@ -13,6 +13,7 @@ not left to the model:
 | Guarantee | Enforced by |
 |---|---|
 | Edits are exact and small | `edit_file`: `old_string` must match once (or `replace_all`), file must have been read and unchanged since |
+| Edits don't break syntax | a write/edit that leaves a `.js`/`.mjs`/`.cjs`/`.json` file unparseable is refused with the parser's message (already-broken files can still be fixed); a missed `old_string` shows the closest matching lines |
 | Nothing changes without you | approval prompt for every write/edit and every non-read-only command (with a diff) |
 | No shell injection | `run_command` has no shell: argv + `spawn`, shell syntax rejected, read-only allowlist, timeout kills the whole process tree |
 | "Done" means the checks pass | after file changes the harness runs `.polvo.json` `checks` and feeds failures back (max `maxFixAttempts`) |

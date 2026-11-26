@@ -12,6 +12,7 @@ import {
 import {
   basename,
   dirname,
+  extname,
   isAbsolute,
   join,
   relative,
@@ -21,6 +22,7 @@ import {
 import type { ToolSchema } from './provider.js';
 import { isAutoApproved, parseCommand, runArgv } from './command.js';
 import { collectSnapshot, evaluate } from './monitor.js';
+import { execFile } from 'node:child_process';
 
 export interface Tool {
   schema: ToolSchema;
@@ -234,11 +236,15 @@ async function writableTarget(input: unknown): Promise<{ abs: string; exists: bo
  * target. rename doesn't follow a symlink or touch a hardlink's other names,
  * and never leaves a half-written file on crash/ENOSPC. Keeps the old mode.
  */
-async function atomicWrite(abs: string, content: string): Promise<void> {
+async function atomicWrite(abs: string, content: string, input: string): Promise<string> {
   const mode = await stat(abs).then((i) => i.mode & 0o7777, () => undefined);
-  const tmpPath = join(dirname(abs), `.polvo-tmp-${process.pid}-${Date.now()}`);
+  // Same directory and extension as the target, so the syntax check sees the
+  // file the way Node will (e.g. a package.json "type": "module" applies).
+  const tmpPath = join(dirname(abs), `.polvo-tmp-${process.pid}-${Date.now()}${extname(abs)}`);
   await writeFile(tmpPath, content, 'utf8');
+  let note = '';
   try {
+    note = await syntaxGuard(tmpPath, abs, input);
     // writeFile's `mode` is filtered by the umask; chmod sets it exactly.
     if (mode !== undefined) await chmod(tmpPath, mode);
     await rename(tmpPath, abs);
@@ -247,6 +253,59 @@ async function atomicWrite(abs: string, content: string): Promise<void> {
     throw err;
   }
   readState.set(abs, (await stat(abs)).mtimeMs);
+  return note;
+}
+
+// ------------------------------------------------------------ syntax guard
+
+const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
+/** JSON-with-comments files that JSON.parse would wrongly reject. */
+const JSONC_NAME = /^(tsconfig|jsconfig)[\w.-]*\.json$|^\.eslintrc\.json$|^devcontainer\.json$/;
+
+/** The parser's complaint about a file, or null if it parses (or isn't a type we check). */
+export async function syntaxError(file: string, kind: string = file): Promise<string | null> {
+  const ext = extname(kind).toLowerCase();
+  if (ext === '.json') {
+    if (JSONC_NAME.test(basename(kind)) || kind.split(sep).includes('.vscode')) return null;
+    try {
+      JSON.parse(await readFile(file, 'utf8'));
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (JS_EXTENSIONS.has(ext)) {
+    return new Promise((done) => {
+      execFile(process.execPath, ['--check', file], { timeout: 15_000 }, (err, _out, stderr) => {
+        if (!err) return done(null);
+        // Node prints "file:line", the source line, a caret, then "SyntaxError: …".
+        const lines = stderr.split('\n');
+        const at = lines.findIndex((l) => /^\w*Error:/.test(l));
+        const where = (lines[0] ?? '').replace(file, '').replace(/^:/, 'line ');
+        const msg = at === -1 ? stderr.trim().split('\n').pop() ?? '' : lines[at]!;
+        done(`${msg}${where ? ` (${where.trim()})` : ''}\n${lines.slice(1, 3).join('\n')}`.trim());
+      });
+    });
+  }
+  return null;
+}
+
+/**
+ * Refuse a write that BREAKS a file's syntax (it parsed before, or it's new,
+ * and the new content doesn't). Weak models write broken code and then claim
+ * success; the parser's message lets them fix it on the next step. If the
+ * file was already broken, allow the write (the model may be mid-fix) but say
+ * it still doesn't parse.
+ */
+async function syntaxGuard(candidate: string, target: string, input: string): Promise<string> {
+  const after = await syntaxError(candidate, target);
+  if (after === null) return '';
+  const existed = await stat(target).then(() => true, () => false);
+  const before = existed ? await syntaxError(target) : null;
+  if (before === null) {
+    throw new Error(`refusing: this change leaves ${input} with a syntax error, so the file was not changed.\n${after}`);
+  }
+  return `\nwarning: ${input} still does not parse:\n${after}`;
 }
 
 function rejectTruncationMarker(text: string): void {
@@ -296,11 +355,47 @@ const writeFileTool: Tool = {
         );
       }
     }
-    await atomicWrite(abs, args.content);
+    const note = await atomicWrite(abs, args.content, path);
     const lines = args.content.split('\n').length;
-    return `${exists ? 'overwrote' : 'created'} ${path} (${lines} line${lines === 1 ? '' : 's'})`;
+    return `${exists ? 'overwrote' : 'created'} ${path} (${lines} line${lines === 1 ? '' : 's'})${note}`;
   },
 };
+
+/**
+ * When old_string isn't found, show the region of the file that matches it
+ * best (whitespace-insensitive, line by line), with line numbers, so the model
+ * can copy the real text instead of guessing again.
+ */
+export function closestMatch(file: string, needle: string): string {
+  const norm = (s: string): string => s.trim().replace(/\s+/g, ' ');
+  const fileLines = file.split('\n');
+  const needleLines = needle.replace(/\r/g, '').split('\n').slice(0, 30);
+  const wanted = needleLines.filter((l) => norm(l) !== '').length;
+  if (wanted === 0) return '';
+  let best = -1;
+  let bestScore = 0;
+  for (let i = 0; i < fileLines.length; i++) {
+    let score = 0;
+    for (let k = 0; k < needleLines.length && i + k < fileLines.length; k++) {
+      const n = norm(needleLines[k]!);
+      if (n !== '' && n === norm(fileLines[i + k]!)) score++;
+    }
+    if (score > bestScore) {
+      best = i;
+      bestScore = score;
+    }
+  }
+  if (best === -1) return ' No similar lines found — read the file again and copy the text verbatim.';
+  const shown = fileLines
+    .slice(best, best + needleLines.length)
+    .map((l, j) => `${best + j + 1}: ${l.replace(/\r$/, '')}`)
+    .join('\n');
+  const hint =
+    bestScore === wanted
+      ? 'These lines match except for whitespace/indentation — copy them exactly as shown (without the "N: " line numbers):'
+      : `Closest match in the file (${bestScore} of ${wanted} lines), copy from here (without the "N: " line numbers):`;
+  return `\n${hint}\n${shown}`;
+}
 
 function countOccurrences(haystack: string, needle: string): number {
   let count = 0;
@@ -366,8 +461,16 @@ const editFileTool: Tool = {
 
     const count = countOccurrences(original, oldStr);
     if (count === 0) {
+      const match = closestMatch(original, oldStr);
+      if (
+        newStr.trim().length >= 6 &&
+        original.includes(newStr) &&
+        !match.includes('except for whitespace')
+      ) {
+        throw new Error(`old_string not found in ${path}, but new_string is already there — the change may already be applied. Read the file to check.`);
+      }
       throw new Error(
-        `old_string not found in ${path}. It must match exactly, including indentation and line breaks — read the file again and copy the text verbatim.`,
+        `old_string not found in ${path}. It must match exactly, including indentation and line breaks.${match}`,
       );
     }
     if (count > 1 && args.replace_all !== true) {
@@ -382,8 +485,8 @@ const editFileTool: Tool = {
         : original.slice(0, original.indexOf(oldStr)) +
           newStr +
           original.slice(original.indexOf(oldStr) + oldStr.length);
-    await atomicWrite(abs, updated);
-    return `edited ${path} (${count} replacement${count === 1 ? '' : 's'})`;
+    const note = await atomicWrite(abs, updated, path);
+    return `edited ${path} (${count} replacement${count === 1 ? '' : 's'})${note}`;
   },
 };
 
@@ -436,9 +539,125 @@ const systemSnapshotTool: Tool = {
   },
 };
 
+const IGNORED_SEARCH_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.cache',
+]);
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`(^|/)${escaped}$`);
+}
+
+const grepTool: Tool = {
+  schema: {
+    name: 'grep',
+    description:
+      'Search for a regex or literal text pattern across files in the project. Returns matching file:line: text lines (read-only, no shell).',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: {
+          type: 'string',
+          description: 'regex or literal text to search for',
+        },
+        path: {
+          type: 'string',
+          description: 'file or directory to search (relative to working directory, default ".")',
+        },
+        glob: {
+          type: 'string',
+          description: 'optional filename filter, e.g. "*.ts" or "*.mjs"',
+        },
+      },
+      required: ['pattern'],
+    },
+  },
+  async run(args) {
+    if (typeof args.pattern !== 'string' || args.pattern === '') {
+      throw new Error('expected a non-empty "pattern" string');
+    }
+    const inputPath =
+      typeof args.path === 'string' && args.path.trim() !== '' ? args.path : '.';
+    const abs = await resolveWithin(inputPath, true);
+    const globRe =
+      typeof args.glob === 'string' && args.glob.trim() !== ''
+        ? globToRegex(args.glob.trim())
+        : null;
+    let re: RegExp;
+    try {
+      re = new RegExp(args.pattern);
+    } catch {
+      re = new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    }
+
+    const root = await realpath(process.cwd());
+    const matches: string[] = [];
+    const MAX_MATCHES = 50;
+    const MAX_SEARCH_FILE_BYTES = 500_000;
+
+    const searchFile = async (fileAbs: string): Promise<void> => {
+      if (matches.length >= MAX_MATCHES) return;
+      const rel = relative(root, fileAbs).split(sep).join('/');
+      if (globRe && !globRe.test(rel)) return;
+      const info = await stat(fileAbs).catch(() => null);
+      if (!info || !info.isFile() || info.size > MAX_SEARCH_FILE_BYTES) return;
+      const content = await readFile(fileAbs, 'utf8').catch(() => null);
+      if (content === null || content.includes('\0')) return;
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (re.test(lines[i]!)) {
+          matches.push(`${rel}:${i + 1}: ${lines[i]!.replace(/\r$/, '')}`);
+          if (matches.length >= MAX_MATCHES) return;
+        }
+      }
+    };
+
+    const walk = async (dirAbs: string): Promise<void> => {
+      if (matches.length >= MAX_MATCHES) return;
+      const entries = await readdir(dirAbs, { withFileTypes: true }).catch(() => []);
+      entries.sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) {
+        if (matches.length >= MAX_MATCHES) return;
+        if (IGNORED_SEARCH_DIRS.has(entry.name)) continue;
+        const next = join(dirAbs, entry.name);
+        if (entry.isDirectory()) {
+          await walk(next);
+        } else if (entry.isFile()) {
+          await searchFile(next);
+        }
+      }
+    };
+
+    const info = await stat(abs);
+    if (info.isFile()) {
+      await searchFile(abs);
+    } else if (info.isDirectory()) {
+      await walk(abs);
+    } else {
+      throw new Error('path is neither a file nor a directory');
+    }
+
+    if (matches.length === 0) return `no matches for "${args.pattern}"`;
+    if (matches.length >= MAX_MATCHES) {
+      matches.push(`…[stopped at ${MAX_MATCHES} matches — narrow path or pattern]`);
+    }
+    return matches.join('\n');
+  },
+};
+
 export const TOOLS: Record<string, Tool> = {
   read_file: readFileTool,
   list_dir: listDirTool,
+  grep: grepTool,
   edit_file: editFileTool,
   write_file: writeFileTool,
   run_command: runCommandTool,

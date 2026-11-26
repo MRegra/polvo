@@ -15,7 +15,10 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "test": "node --import tsx --test test/*.test.ts test/*.test.tsx",
-    "eval": "tsx evals/run.ts"
+    "eval": "tsx evals/run.ts",
+    "eval:30b": "tsx evals/run.ts --model qwen3-coder:30b --num-ctx 16384 --kv-cache q8_0 --min-free-gb 4",
+    "eval:quick": "npm run typecheck && npm test && tsx evals/run.ts --model qwen3-coder:30b --num-ctx 16384 --kv-cache q8_0 --min-free-gb 4 --quick",
+    "eval:full": "npm run typecheck && npm test && npm run eval:30b"
   },
   "license": "MIT",
   "devDependencies": {

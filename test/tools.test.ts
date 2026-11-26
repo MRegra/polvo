@@ -80,3 +80,65 @@ test('write_file refuses to blank out an existing file', async () => {
   assert.equal(readFileSync('cfg.json', 'utf8'), '{"a": 1}');
   assert.match(await run('write_file', { path: 'new-empty.txt', content: '' }), /created/);
 });
+
+test('edits that break JavaScript or JSON syntax are refused, file untouched', async () => {
+  writeFileSync('ok.mjs', 'export const add = (a, b) => a + b;\n');
+  await run('read_file', { path: 'ok.mjs' });
+  await assert.rejects(
+    run('edit_file', { path: 'ok.mjs', old_string: 'a + b;', new_string: 'a + (b;' }),
+    /syntax error[\s\S]*SyntaxError/,
+  );
+  assert.equal(readFileSync('ok.mjs', 'utf8'), 'export const add = (a, b) => a + b;\n');
+  assert.match(await run('edit_file', { path: 'ok.mjs', old_string: 'a + b', new_string: 'b + a' }), /edited/);
+
+  await assert.rejects(run('write_file', { path: 'new.js', content: 'function (' }), /syntax error/);
+  await assert.rejects(run('write_file', { path: 'new.json', content: '{"a": 1,}' }), /syntax error/);
+  assert.match(await run('write_file', { path: 'tsconfig.json', content: '{ // comments are fine here\n}' }), /created/);
+  assert.match(await run('write_file', { path: 'notes.txt', content: 'function (' }), /created/);
+});
+
+test('a file that was already broken can still be edited, with a warning', async () => {
+  writeFileSync('broken.json', '{"a": 1,, "b": 2,}');
+  await run('read_file', { path: 'broken.json' });
+  const r = await run('edit_file', { path: 'broken.json', old_string: '1,,', new_string: '1,' });
+  assert.match(r, /edited[\s\S]*still does not parse/);
+  await run('read_file', { path: 'broken.json' });
+  assert.doesNotMatch(await run('edit_file', { path: 'broken.json', old_string: '2,}', new_string: '2}' }), /warning/);
+});
+
+test('a missed edit shows the closest lines, and spots an already-applied change', async () => {
+  writeFileSync('f.mjs', 'export function area(b, h) {\n    return b * h;\n}\n');
+  await run('read_file', { path: 'f.mjs' });
+  await assert.rejects(
+    run('edit_file', { path: 'f.mjs', old_string: 'export function area(b, h) {\n  return b * h;', new_string: 'x' }),
+    /except for whitespace[\s\S]*2:     return b \* h;/,
+  );
+  await assert.rejects(
+    run('edit_file', { path: 'f.mjs', old_string: 'export function area(b, h) {\n  return b + h;', new_string: 'x' }),
+    /Closest match in the file \(1 of 2 lines\)[\s\S]*1: export function area/,
+  );
+  await assert.rejects(
+    run('edit_file', { path: 'f.mjs', old_string: 'return b + h;', new_string: 'return b * h;' }),
+    /already there/,
+  );
+});
+
+test('grep searches files with line numbers, glob filter, and ignores node_modules/.git', async () => {
+  mkdirSync('src');
+  mkdirSync('node_modules/pkg', { recursive: true });
+  writeFileSync('src/a.ts', 'const port = 8137;\n');
+  writeFileSync('src/b.md', 'port = 3000\n');
+  writeFileSync('node_modules/pkg/c.ts', 'const port = 9999;\n');
+
+  const all = await run('grep', { pattern: 'port' });
+  assert.match(all, /^src\/a\.ts:1: const port = 8137;$/m);
+  assert.match(all, /^src\/b\.md:1: port = 3000$/m);
+  assert.doesNotMatch(all, /node_modules/);
+
+  const onlyTs = await run('grep', { pattern: 'port', glob: '*.ts' });
+  assert.match(onlyTs, /src\/a\.ts:1:/);
+  assert.doesNotMatch(onlyTs, /src\/b\.md/);
+
+  assert.match(await run('grep', { pattern: 'not_anywhere' }), /no matches/);
+  await assert.rejects(run('grep', { pattern: 'x', path: '..' }), /escapes/);
+});

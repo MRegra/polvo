@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildRepoMap } from './repomap.js';
+import type { ModelOptions } from './provider.js';
 
 export interface Config {
   model: string;
@@ -14,6 +16,8 @@ export interface Config {
   checks: string[];
   /** How many times failing checks are fed back before the turn stops. */
   maxFixAttempts: number;
+  /** Optional Ollama sampling / generation options from .polvo.json. */
+  modelOptions?: ModelOptions;
 }
 
 export const SYSTEM_PROMPT = `You are polvo, a terminal coding agent working in the user's current project directory.
@@ -21,6 +25,7 @@ export const SYSTEM_PROMPT = `You are polvo, a terminal coding agent working in 
 Tools:
 - read_file(path): read a text file (relative to the working directory)
 - list_dir(path): list a directory
+- grep(pattern, path?, glob?): search for a regex or text across project files
 - edit_file(path, old_string, new_string, replace_all?): replace an exact,
   unique snippet in a file — the default way to change an existing file
 - write_file(path, content): create a new file, or fully rewrite a small one
@@ -54,6 +59,7 @@ interface ProjectFile {
   maxSteps?: unknown;
   checks?: unknown;
   maxFixAttempts?: unknown;
+  options?: unknown;
 }
 
 /** Read .polvo.json from the project root; a missing file is fine, a broken one is an error. */
@@ -91,6 +97,40 @@ function keepAliveValue(value: unknown): string | undefined {
   return s;
 }
 
+function parseModelOptions(raw: unknown): ModelOptions | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('.polvo.json "options" must be a JSON object');
+  }
+  const obj = raw as Record<string, unknown>;
+  const out: ModelOptions = {};
+  const floatKeys = ['temperature', 'top_p', 'repeat_penalty'] as const;
+  for (const key of floatKeys) {
+    if (obj[key] !== undefined) {
+      if (typeof obj[key] !== 'number' || !Number.isFinite(obj[key])) {
+        throw new Error(`options.${key} must be a finite number`);
+      }
+      out[key] = obj[key] as number;
+    }
+  }
+  const intKeys = ['top_k', 'num_predict'] as const;
+  for (const key of intKeys) {
+    if (obj[key] !== undefined) {
+      const n = obj[key];
+      if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0) {
+        throw new Error(`options.${key} must be a positive integer`);
+      }
+      out[key] = n;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function buildSystemPrompt(cwd: string = process.cwd()): string {
+  const map = buildRepoMap(cwd);
+  return map ? `${SYSTEM_PROMPT}\n\nProject files:\n${map}` : SYSTEM_PROMPT;
+}
+
 /**
  * Resolve runtime config. Precedence: CLI flag > env > .polvo.json > default.
  * `checks` only comes from .polvo.json, and the user approves them once per
@@ -114,10 +154,11 @@ export function loadConfig(
   ) {
     throw new Error('.polvo.json "checks" must be an array of command strings');
   }
+  const modelOptions = parseModelOptions(project.options);
 
   return {
     model,
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(),
     numCtx:
       positiveInt(env.POLVO_NUM_CTX, 'POLVO_NUM_CTX') ??
       positiveInt(project.numCtx, 'numCtx') ??
@@ -134,5 +175,6 @@ export function loadConfig(
     maxFixAttempts:
       positiveInt(project.maxFixAttempts, 'maxFixAttempts') ??
       DEFAULTS.maxFixAttempts,
+    ...(modelOptions ? { modelOptions } : {}),
   };
 }

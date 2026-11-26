@@ -1,4 +1,4 @@
-import type { Message, Provider } from './provider.js';
+import type { ChatUsage, Message, Provider } from './provider.js';
 import { TOOLS, TOOL_SCHEMAS, type Tool } from './tools.js';
 import { capOutput, estimateTokens, fitContext } from './context.js';
 import { failureReport, runChecks, type CheckResult } from './checks.js';
@@ -14,6 +14,8 @@ export interface AgentEvents {
   }): Promise<boolean>;
   /** A project check finished (after the model changed files). */
   onCheck?(result: CheckResult): void;
+  /** Token/timing metrics from a completed model call. */
+  onUsage?(usage: ChatUsage): void;
   /** Harness notices: context trimmed, loop stopped, checks gave up … */
   onNotice?(text: string): void;
 }
@@ -95,7 +97,8 @@ export async function runAgent(
       );
     }
 
-    const { text, toolCalls } = await provider.chat(history, schemas, events.onText, signal);
+    const { text, toolCalls, usage } = await provider.chat(history, schemas, events.onText, signal);
+    if (usage) events.onUsage?.(usage);
 
     history.push({
       role: 'assistant',
@@ -158,7 +161,13 @@ export async function runAgent(
       } else {
         try {
           result = await tool.run(call.args);
-          if (mutates(tool, call.args)) changedFiles = true;
+          if (mutates(tool, call.args)) {
+            changedFiles = true;
+            // After a file changes, re-reading it can legitimately return new content.
+            for (const key of seen.keys()) {
+              if (key.startsWith('read_file:') || key.startsWith('grep:')) seen.delete(key);
+            }
+          }
         } catch (err) {
           result = err instanceof Error ? err.message : String(err);
           isError = true;
