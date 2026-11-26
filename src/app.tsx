@@ -19,9 +19,11 @@ import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
 import { SYSTEM_PROMPT, type Config } from './config.js';
-import { estimateMessages, estimateTokens } from './context.js';
+import { estimateMessages, estimateTokens, fitContext } from './context.js';
 import { parseCommand } from './command.js';
 import { VERSION } from './version.js';
+import { TurnSnapshot } from './undo.js';
+import { resetReadState } from './tools.js';
 
 // Explicit hex colors: ANSI 'gray' and dimColor (faint) are nearly invisible
 // on many dark terminal themes.
@@ -68,6 +70,14 @@ function summarize(result: string): string {
   const lines = result.split('\n').length;
   return `→ ${lines} line${lines === 1 ? '' : 's'}, ${result.length} chars`;
 }
+const MANUAL_TEXT = `Polvo Manual (v${VERSION})
+Commands: /manual (/help) · /plan <task> · /undo · /compact · /status · /clear · /exit
+Approval: y = once · a = always this session · n = decline · Esc = cancel turn
+Scroll:   PageUp/PageDown (Ctrl-U/Ctrl-D) · Up/Down · mouse wheel
+Config:   .polvo.json (model, numCtx, keepAlive, maxSteps, checks, maxFixAttempts, options)
+Env:      \`POLVO_MODEL\`, \`POLVO_NUM_CTX\`, \`POLVO_KEEP_ALIVE\`, \`POLVO_MAX_STEPS\`, \`POLVO_KV_CACHE\`
+CLI:      polvo monitor | update [--check] | eval [--quick] [--test] | run [--yes] "<task>"`;
+
 function sanitize(s: string): string {
   return s.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '');
 }
@@ -414,6 +424,9 @@ export function App({
   const resolvePendingRef =
     useRef<((approved: boolean) => void) | null>(null);
   const pendingSinceRef = useRef(0);
+  const alwaysAllowedRef = useRef<Set<string>>(new Set());
+  const currentSnapshotRef = useRef<TurnSnapshot | null>(null);
+  const lastSnapshotRef = useRef<TurnSnapshot | null>(null);
   const history = useRef<Message[]>([]);
   const [contextTokenCount, setContextTokenCount] =
     useState(0);
@@ -499,6 +512,10 @@ export function App({
         if (key.ctrl || key.meta) return;
         const ch = inputChar.toLowerCase();
         if (ch === 'y') {
+          resolvePending(true);
+        } else if (ch === 'a' && pending && pending.tool !== 'run_checks') {
+          const key = approvalKey(pending.tool, pending.args);
+          if (key) alwaysAllowedRef.current.add(key);
           resolvePending(true);
         } else if (ch === 'n') {
           resolvePending(false);
@@ -670,15 +687,20 @@ export function App({
     (req: {
       tool: string;
       args: Record<string, unknown>;
-    }): Promise<boolean> =>
-      new Promise<boolean>((resolve) => {
+    }): Promise<boolean> => {
+      const key = approvalKey(req.tool, req.args);
+      if (key && alwaysAllowedRef.current.has(key)) {
+        return Promise.resolve(true);
+      }
+      return new Promise<boolean>((resolve) => {
         pendingSinceRef.current = Date.now();
         setPending({
           tool: req.tool,
           args: req.args,
         });
         resolvePendingRef.current = resolve;
-      }),
+      });
+    },
     [],
   );
   // ---------------------------------------------------------
@@ -694,6 +716,83 @@ export function App({
       setScrollOffset(0);
       if (text === '/exit' || text === '/quit') {
         exit();
+        return;
+      }
+      if (text === '/manual' || text === '/help') {
+        setTurns((prev) => [
+          ...prev,
+          { role: 'system', content: MANUAL_TEXT },
+        ]);
+        return;
+      }
+      if (text === '/clear') {
+        history.current = [];
+        lastSnapshotRef.current = null;
+        resetReadState();
+        setTokPerS(null);
+        setTurns([
+          { role: 'system', content: 'cleared conversation history (model stays loaded)' },
+        ]);
+        return;
+      }
+      if (text === '/status') {
+        const checks = config.checks.length ? config.checks.join(', ') : '(none)';
+        const always = alwaysAllowedRef.current.size
+          ? [...alwaysAllowedRef.current].join(', ')
+          : '(none)';
+        const speed = tokPerS !== null ? `${tokPerS} tok/s` : '(no turns yet)';
+        const undo = lastSnapshotRef.current?.hasChanges() ? 'ready' : 'none';
+        setTurns((prev) => [
+          ...prev,
+          {
+            role: 'system',
+            content: sanitizeText(
+              `model: ${provider.model}\ncontext: ${contextTokenCount}/${provider.contextTokens}\nchecks: ${checks}\nalways-approved: ${always}\nlast speed: ${speed}\nundo: ${undo}`,
+            ),
+          },
+        ]);
+        return;
+      }
+      if (text === '/compact') {
+        const before = estimateMessages(history.current);
+        if (history.current.length === 0) {
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: 'nothing to compact — history is empty' },
+          ]);
+          return;
+        }
+        const target = Math.max(500, Math.floor(before * 0.5));
+        const res = fitContext(history.current, target, 2);
+        const after = estimateMessages(history.current);
+        setContextTokenCount(
+          estimateTokens(config.system ?? SYSTEM_PROMPT) + after,
+        );
+        const summary =
+          res.elided === 0 && res.dropped === 0
+            ? `nothing to compact — history is already minimal (${after} tokens)`
+            : `compacted history: ${before} → ${after} tokens (${res.elided} tool output(s) elided, ${res.dropped} message(s) dropped)`;
+        setTurns((prev) => [
+          ...prev,
+          { role: 'system', content: summary },
+        ]);
+        return;
+      }
+      if (text === '/undo') {
+        const snap = lastSnapshotRef.current;
+        if (!snap || !snap.hasChanges()) {
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: 'nothing to undo from the last turn' },
+          ]);
+          return;
+        }
+        const restored = snap.restore();
+        lastSnapshotRef.current = null;
+        setTurns((prev) => [
+          ...prev,
+          { role: 'system', content: sanitizeText(`reverted ${restored.length} file(s): ${restored.join(', ')}`) },
+        ]);
         return;
       }
       // /plan <task>: read-only turn — the harness withholds every tool that
@@ -712,6 +811,7 @@ export function App({
         : text;
       busyRef.current = true;
       setBusy(true);
+      currentSnapshotRef.current = readOnly ? null : new TurnSnapshot();
       const controller = new AbortController();
       abortRef.current = controller;
       setTurns((prev) => [
@@ -743,6 +843,9 @@ export function App({
           ),
         onText: appendText,
         onToolCall: (name, args) => {
+          if ((name === 'edit_file' || name === 'write_file') && typeof args.path === 'string') {
+            currentSnapshotRef.current?.capture(args.path);
+          }
           finalizeAssistant();
           setTurns((prev) => [
             ...prev,
@@ -815,6 +918,10 @@ export function App({
         if (resolvePendingRef.current) {
           resolvePending(false);
         }
+        if (currentSnapshotRef.current?.hasChanges()) {
+          lastSnapshotRef.current = currentSnapshotRef.current;
+        }
+        currentSnapshotRef.current = null;
         abortRef.current = null;
         busyRef.current = false;
         setBusy(false);
@@ -1108,6 +1215,14 @@ function ApprovalPrompt({
           y
         </Text>
         <Text color={MUTED}> = yes · </Text>
+        {pending.tool !== 'run_checks' ? (
+          <>
+            <Text color="cyanBright" bold>
+              a
+            </Text>
+            <Text color={MUTED}> = always · </Text>
+          </>
+        ) : null}
         <Text color="red" bold>
           n
         </Text>
@@ -1117,4 +1232,10 @@ function ApprovalPrompt({
       </Text>
     </Box>
   );
+}
+
+function approvalKey(tool: string, args: Record<string, unknown>): string | null {
+  if (tool === 'edit_file' || tool === 'write_file') return tool;
+  if (tool === 'run_command') return `run_command:${String(args.command ?? '')}`;
+  return null;
 }

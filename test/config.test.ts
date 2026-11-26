@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadConfig, DEFAULTS } from '../src/config.ts';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadConfig, detectChecks, DEFAULTS } from '../src/config.ts';
 
 test('defaults, then .polvo.json, then env, then CLI', () => {
   assert.equal(loadConfig(undefined, {}, {}).numCtx, DEFAULTS.numCtx);
@@ -20,4 +23,14 @@ test('rejects bad values instead of guessing', () => {
     loadConfig(undefined, {}, { options: { temperature: 0.2, top_p: 0.9, num_predict: 2048 } }).modelOptions,
     { temperature: 0.2, top_p: 0.9, num_predict: 2048 },
   );
+});
+
+test('detectChecks infers typecheck and test scripts from package.json', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'polvo-checks-'));
+  assert.deepEqual(detectChecks(dir), []);
+  writeFileSync(
+    join(dir, 'package.json'),
+    JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'node --test' } }),
+  );
+  assert.deepEqual(detectChecks(dir), ['npm run typecheck', 'npm test']);
 });

@@ -97,6 +97,8 @@ interface TaskResult {
   outputTokens?: number;
   evalTokPerS?: number;
   promptEvalS?: number;
+  firstPromptEvalS?: number;
+  cachedPromptEvalS?: number;
   durationS: number;
   error?: string;
 }
@@ -115,6 +117,7 @@ interface Headless {
     promptEvalMs: number;
     evalMs: number;
   };
+  promptEvalMsByStep?: number[];
 }
 
 class LowMemory extends Error {}
@@ -240,6 +243,14 @@ async function main(): Promise<void> {
           h.usage && h.usage.promptEvalMs > 0
             ? Number((h.usage.promptEvalMs / 1000).toFixed(1))
             : undefined;
+        const byStep = h.promptEvalMsByStep ?? [];
+        const firstPromptEvalS =
+          byStep.length > 0 ? Number((byStep[0]! / 1000).toFixed(1)) : undefined;
+        const cachedSteps = byStep.slice(1);
+        const cachedPromptEvalS =
+          cachedSteps.length > 0
+            ? Number((cachedSteps.reduce((a, b) => a + b, 0) / cachedSteps.length / 1000).toFixed(1))
+            : undefined;
         r = {
           task, pass: check.pass && h.status === 'ok', reason: check.reason, error: h.error,
           steps: h.steps, toolCalls: h.toolCalls.length, toolErrors: errors.length,
@@ -248,6 +259,8 @@ async function main(): Promise<void> {
           ...(h.usage ? { promptTokens: h.usage.promptTokens, outputTokens: h.usage.outputTokens } : {}),
           ...(evalTokPerS !== undefined ? { evalTokPerS } : {}),
           ...(promptEvalS !== undefined ? { promptEvalS } : {}),
+          ...(firstPromptEvalS !== undefined ? { firstPromptEvalS } : {}),
+          ...(cachedPromptEvalS !== undefined ? { cachedPromptEvalS } : {}),
           durationS: Math.round((Date.now() - started) / 1000),
         };
       } catch (err) {

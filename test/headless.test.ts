@@ -75,6 +75,7 @@ test('accumulates provider usage and records failed tool details', async () => {
   const r = await runHeadless(p, config, 'go', { yes: true });
   assert.equal(r.status, 'ok');
   assert.deepEqual(r.usage, { promptTokens: 220, outputTokens: 30, promptEvalMs: 250, evalMs: 750 });
+  assert.deepEqual(r.promptEvalMsByStep, [200, 50]);
   assert.equal(r.toolCalls[0]?.error, true);
   assert.match(r.toolCalls[0]?.detail ?? '', /missing\.txt/);
 });

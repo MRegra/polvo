@@ -44,7 +44,11 @@ project file (.polvo.json, all optional):
   checks run after the model changes files; you approve them once per session.
 
 while running:
+  /manual, /help     show built-in manual
   /plan <task>       read-only: the model explores and proposes a plan
+  /undo              revert all file changes from the last turn
+  /compact           compact context window on demand
+  /status, /clear    show session status / clear history
   /exit, /quit       leave   ·   Ctrl-C also quits`;
 
 function parse(): {

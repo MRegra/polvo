@@ -23,7 +23,7 @@ export interface Config {
 export const SYSTEM_PROMPT = `You are polvo, a terminal coding agent working in the user's current project directory.
 
 Tools:
-- read_file(path): read a text file (relative to the working directory)
+- read_file(path, start_line?, end_line?): read a text file (relative to the working directory)
 - list_dir(path): list a directory
 - grep(pattern, path?, glob?): search for a regex or text across project files
 - edit_file(path, old_string, new_string, replace_all?): replace an exact,
@@ -76,6 +76,33 @@ export function readProjectFile(dir: string = process.cwd()): ProjectFile {
     throw new Error('.polvo.json must contain a JSON object');
   }
   return parsed as ProjectFile;
+}
+
+/**
+ * Infer safe verification commands from package.json when .polvo.json doesn't
+ * specify `checks`. Still subject to the one-time `run_checks` approval prompt.
+ */
+export function detectChecks(dir: string = process.cwd()): string[] {
+  try {
+    const raw = readFileSync(join(dir, 'package.json'), 'utf8');
+    const pkg = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+    const scripts = pkg?.scripts;
+    if (!scripts || typeof scripts !== 'object') return [];
+    const found: string[] = [];
+    if (typeof scripts.typecheck === 'string' && scripts.typecheck.trim() !== '') {
+      found.push('npm run typecheck');
+    }
+    if (
+      typeof scripts.test === 'string' &&
+      scripts.test.trim() !== '' &&
+      !scripts.test.includes('no test specified')
+    ) {
+      found.push('npm test');
+    }
+    return found;
+  } catch {
+    return [];
+  }
 }
 
 function positiveInt(value: unknown, name: string): number | undefined {
@@ -139,41 +166,44 @@ export function buildSystemPrompt(cwd: string = process.cwd()): string {
 export function loadConfig(
   cliModel?: string,
   env: NodeJS.ProcessEnv = process.env,
-  project: ProjectFile = readProjectFile(),
+  project?: ProjectFile,
 ): Config {
+  const fromDisk = project === undefined;
+  const resolvedProject = project ?? readProjectFile();
   const model =
     cliModel ??
     (env.POLVO_MODEL || undefined) ??
-    (typeof project.model === 'string' ? project.model : undefined) ??
+    (typeof resolvedProject.model === 'string' ? resolvedProject.model : undefined) ??
     DEFAULTS.model;
 
-  const checks = project.checks ?? [];
+  const rawChecks =
+    resolvedProject.checks ?? (fromDisk ? detectChecks() : []);
   if (
-    !Array.isArray(checks) ||
-    !checks.every((c) => typeof c === 'string' && c.trim() !== '')
+    !Array.isArray(rawChecks) ||
+    !rawChecks.every((c) => typeof c === 'string' && c.trim() !== '')
   ) {
     throw new Error('.polvo.json "checks" must be an array of command strings');
   }
-  const modelOptions = parseModelOptions(project.options);
+  const modelOptions = parseModelOptions(resolvedProject.options);
 
   return {
     model,
     system: buildSystemPrompt(),
     numCtx:
       positiveInt(env.POLVO_NUM_CTX, 'POLVO_NUM_CTX') ??
-      positiveInt(project.numCtx, 'numCtx') ??
+      positiveInt(resolvedProject.numCtx, 'numCtx') ??
       DEFAULTS.numCtx,
     keepAlive:
       keepAliveValue(env.POLVO_KEEP_ALIVE) ??
-      keepAliveValue(project.keepAlive) ??
+      keepAliveValue(resolvedProject.keepAlive) ??
       DEFAULTS.keepAlive,
     maxSteps:
       positiveInt(env.POLVO_MAX_STEPS, 'POLVO_MAX_STEPS') ??
-      positiveInt(project.maxSteps, 'maxSteps') ??
+      positiveInt(resolvedProject.maxSteps, 'maxSteps') ??
       DEFAULTS.maxSteps,
-    checks,
+    checks: rawChecks,
     maxFixAttempts:
-      positiveInt(project.maxFixAttempts, 'maxFixAttempts') ??
+      positiveInt(resolvedProject.maxFixAttempts, 'maxFixAttempts') ??
       DEFAULTS.maxFixAttempts,
     ...(modelOptions ? { modelOptions } : {}),
   };

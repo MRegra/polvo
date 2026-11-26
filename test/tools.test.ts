@@ -142,3 +142,19 @@ test('grep searches files with line numbers, glob filter, and ignores node_modul
   assert.match(await run('grep', { pattern: 'not_anywhere' }), /no matches/);
   await assert.rejects(run('grep', { pattern: 'x', path: '..' }), /escapes/);
 });
+
+test('read_file supports end_line ranges', async () => {
+  writeFileSync('lines.txt', 'one\ntwo\nthree\nfour\nfive\n');
+  assert.equal(await run('read_file', { path: 'lines.txt', start_line: 2, end_line: 4 }), 'two\nthree\nfour');
+  await assert.rejects(run('read_file', { path: 'lines.txt', start_line: 4, end_line: 2 }), /end_line/);
+});
+
+test('leading slash for a project file hints to drop the slash', async () => {
+  mkdirSync('lib');
+  writeFileSync('lib/total.mjs', 'export const x = 1;\n');
+  await assert.rejects(
+    run('read_file', { path: '/lib/total.mjs' }),
+    /drop the leading "\/" to use the project-relative path "lib\/total\.mjs"/,
+  );
+  await assert.rejects(run('read_file', { path: '/etc/passwd' }), /escapes the working directory/);
+});

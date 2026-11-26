@@ -33,7 +33,7 @@ export interface Tool {
   run(args: Record<string, unknown>): Promise<string>;
 }
 
-const MAX_BYTES = 16_000;
+const MAX_BYTES = 8_000;
 const TRUNCATION_PREFIX = '…[truncated';
 /** Files bigger than this are refused outright (read and edit). */
 const MAX_FILE_BYTES = 2_000_000;
@@ -72,6 +72,24 @@ async function requireFreshRead(abs: string, input: string): Promise<void> {
  * checked against that. A broken/dangling symlink is refused outright: its
  * target is missing so it looks "absent", but following it would escape.
  */
+async function leadingSlashHint(root: string, input: string): Promise<string> {
+  if (!input.startsWith('/')) return '';
+  const stripped = input.replace(/^\/+/, '');
+  if (!stripped) return '';
+  const candidate = resolve(root, stripped);
+  const rel = relative(root, candidate);
+  if (
+    rel !== '' &&
+    rel !== '..' &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel) &&
+    (await stat(candidate).then(() => true, () => false))
+  ) {
+    return ` — drop the leading "/" to use the project-relative path "${stripped}"`;
+  }
+  return '';
+}
+
 async function resolveWithin(
   input: unknown,
   mustExist: boolean,
@@ -91,7 +109,7 @@ async function resolveWithin(
     real = await realpath(abs);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    if (mustExist) throw new Error(`cannot access path: ${input}`);
+    if (mustExist) throw new Error(`cannot access path: ${input}${await leadingSlashHint(root, input)}`);
     // realpath failed with ENOENT: either truly absent, or a dangling symlink
     // (the link exists but its target doesn't). lstat tells them apart; refuse
     // the dangling link, since writing would follow it outside the cwd.
@@ -101,7 +119,7 @@ async function resolveWithin(
     try {
       realParent = await realpath(dirname(abs));
     } catch {
-      throw new Error(`parent directory does not exist: ${input}`);
+      throw new Error(`parent directory does not exist: ${input}${await leadingSlashHint(root, input)}`);
     }
     real = join(realParent, basename(abs));
   }
@@ -110,7 +128,7 @@ async function resolveWithin(
     rel !== '' &&
     (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))
   ) {
-    throw new Error(`path escapes the working directory: ${input}`);
+    throw new Error(`path escapes the working directory: ${input}${await leadingSlashHint(root, input)}`);
   }
   return real;
 }
@@ -119,7 +137,7 @@ const readFileTool: Tool = {
   schema: {
     name: 'read_file',
     description:
-      'Read a UTF-8 text file. Long files come back in pages: pass start_line (1-based) to continue where the previous page stopped.',
+      'Read a UTF-8 text file. Long files come back in pages: pass start_line (1-based) and optional end_line to read a specific range.',
     parameters: {
       type: 'object',
       properties: {
@@ -130,6 +148,10 @@ const readFileTool: Tool = {
         start_line: {
           type: 'number',
           description: 'first line to return (1-based, default 1)',
+        },
+        end_line: {
+          type: 'number',
+          description: 'last line to return (1-based, inclusive)',
         },
       },
       required: ['path'],
@@ -149,6 +171,11 @@ const readFileTool: Tool = {
     if (!Number.isInteger(startLine) || startLine < 1) {
       throw new Error('start_line must be a positive integer');
     }
+    const endLine =
+      args.end_line === undefined ? undefined : Number(args.end_line);
+    if (endLine !== undefined && (!Number.isInteger(endLine) || endLine < startLine)) {
+      throw new Error('end_line must be an integer >= start_line');
+    }
     // isFile() above already rejects FIFOs and devices, and the size cap keeps
     // the full read bounded.
     const all = await readFile(abs, 'utf8');
@@ -157,14 +184,15 @@ const readFileTool: Tool = {
     if (startLine > lines.length) {
       throw new Error(`start_line ${startLine} is past the end (${lines.length} lines)`);
     }
+    const limit = endLine === undefined ? lines.length : Math.min(lines.length, endLine);
     let out = '';
     let i = startLine - 1;
-    for (; i < lines.length; i++) {
+    for (; i < limit; i++) {
       const next = (out ? '\n' : '') + lines[i];
       if (out && out.length + next.length > MAX_BYTES) break;
       out += next;
     }
-    if (i < lines.length) {
+    if (i < limit || (endLine === undefined && i < lines.length)) {
       out += `\n${TRUNCATION_PREFIX} at line ${i} of ${lines.length} — call read_file with start_line=${i + 1} to continue]`;
     }
     return out;

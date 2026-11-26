@@ -32,6 +32,8 @@ export interface HeadlessResult {
   durationMs: number;
   /** Accumulated Ollama token/timing metrics across steps, when reported. */
   usage?: ChatUsage;
+  /** Prompt-evaluation milliseconds for each step (step 1 cold vs. cached steps). */
+  promptEvalMsByStep?: number[];
 }
 
 const AUTO_APPROVE_WITH_YES = new Set(['edit_file', 'write_file', 'run_checks']);
@@ -48,6 +50,7 @@ export async function runHeadless(
     contextTokens: 0, durationMs: 0,
   };
   const usage: ChatUsage = { promptTokens: 0, outputTokens: 0, promptEvalMs: 0, evalMs: 0 };
+  const promptEvalMsByStep: number[] = [];
   let hasUsage = false;
   // Count model calls without touching the agent loop.
   const counted: Provider = {
@@ -63,6 +66,7 @@ export async function runHeadless(
         usage.outputTokens += chatResult.usage.outputTokens;
         usage.promptEvalMs += chatResult.usage.promptEvalMs;
         usage.evalMs += chatResult.usage.evalMs;
+        promptEvalMsByStep.push(chatResult.usage.promptEvalMs);
       }
       return chatResult;
     },
@@ -101,6 +105,9 @@ export async function runHeadless(
   result.text = finalText.trim();
   result.contextTokens = estimateMessages(history);
   result.durationMs = Date.now() - started;
-  if (hasUsage) result.usage = usage;
+  if (hasUsage) {
+    result.usage = usage;
+    result.promptEvalMsByStep = promptEvalMsByStep;
+  }
   return result;
 }

@@ -1,0 +1,35 @@
+name: Bump Version
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bump patch version if unchanged
+        run: |
+          prev=$(git show HEAD~1:package.json 2>/dev/null | node -e "const fs=require('fs'); try{console.log(JSON.parse(fs.readFileSync(0,'utf8')).version)}catch{}" || true)
+          curr=$(node -p "require('./package.json').version")
+          if [ "$prev" = "$curr" ]; then
+            npm version patch --no-git-tag-version
+            next=$(node -p "require('./package.json').version")
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add package.json package-lock.json
+            git commit -m "chore: bump version to $next [skip ci]"
+            git push origin HEAD:master
+          else
+            echo "Version already bumped ($prev -> $curr); skipping."
+          fi
