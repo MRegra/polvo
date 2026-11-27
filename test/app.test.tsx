@@ -64,4 +64,14 @@ test('/manual and /status render deterministic harness info without calling the 
   assert.match(ui2.lastFrame() ?? '', /checks: npm test/);
   assert.equal(chats, 0);
   ui2.unmount();
+
+  const ui3 = render(<App provider={provider} config={{ maxSteps: 10, checks: ['node -e "process.exit(0)"'], maxFixAttempts: 3 }} />);
+  await tick(100);
+  ui3.stdin.write('/checks');
+  await tick(100);
+  ui3.stdin.write('\r');
+  for (let i = 0; i < 60 && !ui3.lastFrame()?.includes('✓ node -e'); i++) await tick();
+  assert.match(ui3.lastFrame() ?? '', /✓ node -e/);
+  assert.equal(chats, 0);
+  ui3.unmount();
 });

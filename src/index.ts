@@ -47,6 +47,7 @@ while running:
   /manual, /help     show built-in manual
   /plan <task>       read-only: the model explores and proposes a plan
   /ask-agy <prompt>  ask Antigravity CLI (read-only) and add reply to context
+  /checks            run project checks on demand
   /diff [file]       show git diff (--stat or for one file)
   /undo              revert all file changes from the last turn
   /resume            restore the last saved session for this directory
@@ -90,7 +91,8 @@ options:
   --kv-cache <type>    f16 | q8_0 | q4_0 (default: $POLVO_KV_CACHE or f16)
   --min-free-gb <n>    abort if available RAM drops below this (default: 3)
   --headroom-gb <n>    required free RAM headroom before loading (default: 4)
-  --timeout-min <n>    per-task timeout in minutes (default: 20)`;
+  --timeout-min <n>    per-task timeout in minutes (default: 20)
+  --compare <a[,b]>    compare two saved eval result JSONs (or <a> vs latest) without running`;
 
 if (process.argv[2] === 'eval' || process.argv[2] === 'benchmark') {
   const rest = process.argv.slice(3);

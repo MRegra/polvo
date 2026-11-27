@@ -11,9 +11,9 @@
  * the run and unloads the model if free memory falls below --min-free-gb.
  */
 import { execFile, spawn } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { parseMeminfo } from '../src/monitor.ts';
@@ -235,12 +235,18 @@ function findPreviousResult(dir: string, model: string, currentFile: string): { 
   }
 }
 
+export function resolveResultPath(spec: string, resultsDir: string = RESULTS_DIR): string {
+  if (existsSync(spec)) return spec;
+  return join(resultsDir, spec.endsWith('.json') ? spec : `${spec}.json`);
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       model: { type: 'string', default: process.env.POLVO_MODEL ?? 'qwen3-coder:30b' },
       tasks: { type: 'string' },
       quick: { type: 'boolean', default: false },
+      compare: { type: 'string' },
       'num-ctx': { type: 'string', default: '16384' },
       'timeout-min': { type: 'string', default: '20' },
       'min-free-gb': { type: 'string', default: '3' },
@@ -249,6 +255,22 @@ async function main(): Promise<void> {
       'kv-cache': { type: 'string', default: process.env.POLVO_KV_CACHE ?? 'f16' },
     },
   });
+  if (values.compare) {
+    const [aSpec, bSpec] = values.compare.split(',');
+    if (!aSpec) throw new Error('--compare expects <prev>[,<curr>]');
+    const aPath = resolveResultPath(aSpec);
+    const prevSummary = JSON.parse(readFileSync(aPath, 'utf8')) as EvalSummary;
+    let currSummary: EvalSummary;
+    if (bSpec) {
+      currSummary = JSON.parse(readFileSync(resolveResultPath(bSpec), 'utf8')) as EvalSummary;
+    } else {
+      const latest = findPreviousResult(RESULTS_DIR, prevSummary.model, aPath);
+      if (!latest) throw new Error(`no other result found for ${prevSummary.model}`);
+      currSummary = latest.summary;
+    }
+    console.log(formatComparison(prevSummary, currSummary, basename(aPath, '.json')));
+    return;
+  }
   const model = values.model!;
   const numCtx = Number(values['num-ctx']);
   const minFree = Number(values['min-free-gb']);

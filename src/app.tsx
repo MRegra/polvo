@@ -19,13 +19,14 @@ import { runAgent } from './agent.js';
 import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
 import { SYSTEM_PROMPT, type Config } from './config.js';
-import { estimateMessages, estimateTokens, fitContext } from './context.js';
+import { estimateMessages, estimateTokens, fitContext, capOutput } from './context.js';
 import { parseCommand, runArgv } from './command.js';
 import { VERSION } from './version.js';
 import { TurnSnapshot } from './undo.js';
 import { resetReadState } from './tools.js';
 import { askExternalCli } from './escalate.js';
 import { loadSession, saveSession } from './session.js';
+import { runChecks } from './checks.js';
 
 // Explicit hex colors: ANSI 'gray' and dimColor (faint) are nearly invisible
 // on many dark terminal themes.
@@ -73,9 +74,9 @@ function summarize(result: string): string {
   return `→ ${lines} line${lines === 1 ? '' : 's'}, ${result.length} chars`;
 }
 const MANUAL_TEXT = `Polvo Manual (v${VERSION})
-Commands: /manual (/help) · /plan <task> · /ask-agy <q> · /diff [file] · /undo · /resume · /compact · /status · /clear · /exit
+Commands: /manual (/help) · /plan <task> · /ask-agy <q> · /checks · /diff [file] · /undo · /resume · /compact · /status · /clear · /exit
 Approval: y = once · a = always this session · n = decline · Esc = cancel turn
-Scroll:   PageUp/PageDown (Ctrl-U/Ctrl-D) · Up/Down · mouse wheel
+Scroll:   PageUp/PageDown (Ctrl-U/Ctrl-D) · Up/Down · mouse wheel · Ctrl-P/Ctrl-N = prompt history
 Config:   .polvo.json (model, numCtx, keepAlive, maxSteps, checks, maxFixAttempts, options)
 Env:      \`POLVO_MODEL\`, \`POLVO_NUM_CTX\`, \`POLVO_KEEP_ALIVE\`, \`POLVO_MAX_STEPS\`, \`POLVO_KV_CACHE\`
 CLI:      polvo monitor | update [--check] | eval [--quick] [--test] | run [--yes] "<task>"`;
@@ -427,6 +428,9 @@ export function App({
     useRef<((approved: boolean) => void) | null>(null);
   const pendingSinceRef = useRef(0);
   const alwaysAllowedRef = useRef<Set<string>>(new Set());
+  const promptHistoryRef = useRef<string[]>([]);
+  const historyCursorRef = useRef<number>(-1);
+  const draftInputRef = useRef<string>('');
   const currentSnapshotRef = useRef<TurnSnapshot | null>(null);
   const lastSnapshotRef = useRef<TurnSnapshot | null>(null);
   const history = useRef<Message[]>([]);
@@ -529,6 +533,30 @@ export function App({
       }
       if (key.escape) {
         abortRef.current?.abort();
+        return;
+      }
+      if (!busyRef.current && key.ctrl && inputChar.toLowerCase() === 'p') {
+        const list = promptHistoryRef.current;
+        if (list.length === 0) return;
+        if (historyCursorRef.current === -1) {
+          draftInputRef.current = input;
+          historyCursorRef.current = list.length - 1;
+        } else if (historyCursorRef.current > 0) {
+          historyCursorRef.current--;
+        }
+        setInput(list[historyCursorRef.current]!);
+        return;
+      }
+      if (!busyRef.current && key.ctrl && inputChar.toLowerCase() === 'n') {
+        if (historyCursorRef.current === -1) return;
+        const list = promptHistoryRef.current;
+        if (historyCursorRef.current < list.length - 1) {
+          historyCursorRef.current++;
+          setInput(list[historyCursorRef.current]!);
+        } else {
+          historyCursorRef.current = -1;
+          setInput(draftInputRef.current);
+        }
         return;
       }
       // Keep ordinary text input unaffected.
@@ -713,7 +741,12 @@ export function App({
       if (busyRef.current) return;
       const text = sanitizeText(raw.trim());
       setInput('');
+      historyCursorRef.current = -1;
+      draftInputRef.current = '';
       if (text === '') return;
+      if (promptHistoryRef.current.at(-1) !== text) {
+        promptHistoryRef.current.push(text);
+      }
       // A new prompt returns the viewport to the bottom.
       setScrollOffset(0);
       if (text === '/exit' || text === '/quit') {
@@ -834,6 +867,33 @@ export function App({
           ...prev,
           { role: 'system', content: sanitizeText(body || '(working tree clean)') },
         ]);
+        return;
+      }
+      if (text === '/checks') {
+        if (config.checks.length === 0) {
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: 'no checks configured in .polvo.json or package.json' },
+          ]);
+          return;
+        }
+        busyRef.current = true;
+        setBusy(true);
+        try {
+          const results = await runChecks(config.checks);
+          const lines = results.map((r) =>
+            r.ok
+              ? `✓ ${r.command}`
+              : `✗ ${r.command} (exit ${r.exitCode ?? 'killed'})\n${capOutput(r.output, 2_000)}`,
+          );
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: sanitizeText(lines.join('\n')), error: results.some((r) => !r.ok) },
+          ]);
+        } finally {
+          busyRef.current = false;
+          setBusy(false);
+        }
         return;
       }
       const askMatch = /^\/ask-agy(?:\s+(.*))?$/.exec(text);

@@ -34,7 +34,7 @@ export interface AgentOptions {
 }
 
 /** Room kept for the system prompt, tool schemas and the model's reply. */
-const OUTPUT_RESERVE = 4_096;
+const OUTPUT_RESERVE = 2_048;
 const SYSTEM_RESERVE = 1_500;
 const SCHEMA_TOKENS = estimateTokens(JSON.stringify(TOOL_SCHEMAS));
 

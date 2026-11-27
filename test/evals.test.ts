@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCheck, formatComparison } from '../evals/run.ts';
+import { runCheck, formatComparison, resolveResultPath } from '../evals/run.ts';
 
 const TASKS = join(import.meta.dirname, '..', 'evals', 'tasks');
 
@@ -44,4 +44,5 @@ test('formatComparison reports deltas against previous eval run', () => {
   const out = formatComparison(prev, curr, 'prev-run');
   assert.match(out, /vs prev-run: passed 1\/2→2\/2 · steps 10→6 · time 100s→55s/);
   assert.match(out, /a: ✗→✓\s+steps 7→3\s+60s→20s/);
+  assert.equal(resolveResultPath('2026-11-26', '/tmp/res'), '/tmp/res/2026-11-26.json');
 });

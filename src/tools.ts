@@ -33,7 +33,7 @@ export interface Tool {
   run(args: Record<string, unknown>): Promise<string>;
 }
 
-const MAX_BYTES = 8_000;
+const MAX_BYTES = 4_000;
 const TRUNCATION_PREFIX = '…[truncated';
 /** Files bigger than this are refused outright (read and edit). */
 const MAX_FILE_BYTES = 2_000_000;
