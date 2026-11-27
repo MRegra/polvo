@@ -121,6 +121,11 @@ interface Headless {
 }
 
 class LowMemory extends Error {}
+class TaskTimeout extends Error {
+  constructor(message: string, readonly partial?: Headless) {
+    super(message);
+  }
+}
 
 function runPolvo(
   workDir: string,
@@ -136,15 +141,28 @@ function runPolvo(
     let out = '';
     let err = '';
     let reason: Error | null = null;
-    const killGroup = (why: Error): void => {
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    const killGroup = (why: Error, graceful = false): void => {
       reason ??= why;
       try {
-        if (child.pid) process.kill(-child.pid, 'SIGKILL');
+        if (child.pid) process.kill(-child.pid, graceful ? 'SIGTERM' : 'SIGKILL');
       } catch {
         // gone
       }
+      if (graceful && child.pid) {
+        forceKillTimer = setTimeout(() => {
+          try {
+            if (child.pid) process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            // gone
+          }
+        }, 3_000);
+      }
     };
-    const timer = setTimeout(() => killGroup(new Error(`timed out after ${timeoutMs / 60_000} min`)), timeoutMs);
+    const timer = setTimeout(
+      () => killGroup(new TaskTimeout(`timed out after ${timeoutMs / 60_000} min`), true),
+      timeoutMs,
+    );
     const watchdog = setInterval(() => {
       const free = memAvailableGB();
       if (free < minFreeGB) killGroup(new LowMemory(`only ${free.toFixed(1)} GB RAM available (< ${minFreeGB})`));
@@ -153,19 +171,69 @@ function runPolvo(
     child.stderr.on('data', (d: Buffer) => (err += d.toString('utf8')));
     child.on('close', () => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       clearInterval(watchdog);
-      if (reason) return fail(reason);
       const line = out.trim().split('\n').pop() ?? '';
+      let parsed: Headless | undefined;
       try {
-        done(JSON.parse(line) as Headless);
+        if (line) parsed = JSON.parse(line) as Headless;
       } catch {
-        fail(new Error(`no JSON result (stderr: ${err.trim().slice(0, 200)})`));
+        // ignore parse failure on partial output
       }
+      if (reason instanceof TaskTimeout) {
+        return fail(new TaskTimeout(reason.message, parsed));
+      }
+      if (reason) return fail(reason);
+      if (parsed) return done(parsed);
+      fail(new Error(`no JSON result (stderr: ${err.trim().slice(0, 200)})`));
     });
   });
 }
 
 const QUICK_TASKS = ['answer-question', 'implement-to-tests', 'rename-function'];
+
+interface EvalSummary {
+  model: string;
+  numCtx: number;
+  date: string;
+  passed: number;
+  total: number;
+  totalSteps: number;
+  totalSeconds: number;
+  results: TaskResult[];
+}
+
+export function formatComparison(prev: EvalSummary, curr: EvalSummary, prevName: string): string {
+  const header = `vs ${prevName}: passed ${prev.passed}/${prev.total}→${curr.passed}/${curr.total} · steps ${prev.totalSteps}→${curr.totalSteps} · time ${prev.totalSeconds}s→${curr.totalSeconds}s`;
+  const byTask = new Map(prev.results.map((r) => [r.task, r]));
+  const diffs: string[] = [];
+  for (const r of curr.results) {
+    const p = byTask.get(r.task);
+    if (!p) continue;
+    if (p.pass !== r.pass || p.steps !== r.steps || Math.abs(p.durationS - r.durationS) >= 10) {
+      const status = p.pass === r.pass ? (r.pass ? '✓' : '✗') : `${p.pass ? '✓' : '✗'}→${r.pass ? '✓' : '✗'}`;
+      diffs.push(`  ${r.task}: ${status}  steps ${p.steps}→${r.steps}  ${p.durationS}s→${r.durationS}s`);
+    }
+  }
+  return diffs.length ? `${header}\n${diffs.join('\n')}` : header;
+}
+
+function findPreviousResult(dir: string, model: string, currentFile: string): { name: string; summary: EvalSummary } | null {
+  const suffix = `-${model.replace(/[^\w.-]/g, '_')}.json`;
+  const files = readdirSync(dir)
+    .filter((f) => f.endsWith(suffix) && join(dir, f) !== currentFile)
+    .sort();
+  const latest = files.at(-1);
+  if (!latest) return null;
+  try {
+    return {
+      name: latest.replace(/\.json$/, ''),
+      summary: JSON.parse(readFileSync(join(dir, latest), 'utf8')) as EvalSummary,
+    };
+  } catch {
+    return null;
+  }
+}
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -264,15 +332,29 @@ async function main(): Promise<void> {
           durationS: Math.round((Date.now() - started) / 1000),
         };
       } catch (err) {
+        const partial = err instanceof TaskTimeout ? err.partial : undefined;
+        const errors = (partial?.toolCalls ?? [])
+          .filter((c) => c.error)
+          .map((c) => ({ tool: c.name, message: c.detail ?? '' }));
         r = {
           task, pass: false, error: err instanceof Error ? err.message : String(err),
-          steps: 0, toolCalls: 0, toolErrors: 0, checksRun: 0, declined: [],
+          steps: partial?.steps ?? 0,
+          toolCalls: partial?.toolCalls.length ?? 0,
+          toolErrors: errors.length,
+          ...(errors.length ? { errors } : {}),
+          checksRun: partial?.checks.length ?? 0,
+          declined: partial?.declined ?? [],
+          ...(partial?.usage ? { promptTokens: partial.usage.promptTokens, outputTokens: partial.usage.outputTokens } : {}),
           durationS: Math.round((Date.now() - started) / 1000),
         };
         if (err instanceof LowMemory) {
           results.push(r);
           console.log(`✗ aborted: ${r.error}`);
           break;
+        }
+        if (err instanceof TaskTimeout) {
+          // Reset Ollama's in-flight model state so a stalled task doesn't poison the next one.
+          await unload(model);
         }
       }
       results.push(r);
@@ -294,8 +376,10 @@ async function main(): Promise<void> {
   };
   mkdirSync(RESULTS_DIR, { recursive: true });
   const file = join(RESULTS_DIR, `${summary.date.slice(0, 16).replace(/[:T]/g, '-')}-${model.replace(/[^\w.-]/g, '_')}.json`);
+  const prev = findPreviousResult(RESULTS_DIR, model, file);
   writeFileSync(file, JSON.stringify(summary, null, 2) + '\n');
   console.log(`\n${passed}/${results.length} passed · ${summary.totalSteps} steps · ${summary.totalSeconds}s · ${file}`);
+  if (prev) console.log(formatComparison(prev.summary, summary, prev.name));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

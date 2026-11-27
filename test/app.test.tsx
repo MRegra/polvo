@@ -23,9 +23,9 @@ test('an edit_file request shows a diff and waits for approval', async () => {
     chat: async () => script.shift() ?? { text: 'done', toolCalls: [] },
   };
   const ui = render(<App provider={provider} config={{ maxSteps: 10, checks: [], maxFixAttempts: 3 }} />);
-  await tick();
+  await tick(150);
   ui.stdin.write('change it');
-  await tick();
+  await tick(100);
   ui.stdin.write('\r');
   for (let i = 0; i < 200 && !ui.lastFrame()?.includes('wants to edit file'); i++) await tick();
   const frame = ui.lastFrame() ?? '';

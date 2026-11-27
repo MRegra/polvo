@@ -20,10 +20,12 @@ import type { Message, Provider } from './provider.js';
 import { normalize } from 'node:path';
 import { SYSTEM_PROMPT, type Config } from './config.js';
 import { estimateMessages, estimateTokens, fitContext } from './context.js';
-import { parseCommand } from './command.js';
+import { parseCommand, runArgv } from './command.js';
 import { VERSION } from './version.js';
 import { TurnSnapshot } from './undo.js';
 import { resetReadState } from './tools.js';
+import { askExternalCli } from './escalate.js';
+import { loadSession, saveSession } from './session.js';
 
 // Explicit hex colors: ANSI 'gray' and dimColor (faint) are nearly invisible
 // on many dark terminal themes.
@@ -71,7 +73,7 @@ function summarize(result: string): string {
   return `→ ${lines} line${lines === 1 ? '' : 's'}, ${result.length} chars`;
 }
 const MANUAL_TEXT = `Polvo Manual (v${VERSION})
-Commands: /manual (/help) · /plan <task> · /undo · /compact · /status · /clear · /exit
+Commands: /manual (/help) · /plan <task> · /ask-agy <q> · /diff [file] · /undo · /resume · /compact · /status · /clear · /exit
 Approval: y = once · a = always this session · n = decline · Esc = cancel turn
 Scroll:   PageUp/PageDown (Ctrl-U/Ctrl-D) · Up/Down · mouse wheel
 Config:   .polvo.json (model, numCtx, keepAlive, maxSteps, checks, maxFixAttempts, options)
@@ -795,6 +797,81 @@ export function App({
         ]);
         return;
       }
+      if (text === '/resume') {
+        const saved = loadSession(process.cwd());
+        if (!saved || saved.messages.length === 0) {
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: 'no saved session for this directory' },
+          ]);
+          return;
+        }
+        history.current = saved.messages;
+        resetReadState();
+        setContextTokenCount(
+          estimateTokens(config.system ?? SYSTEM_PROMPT) + estimateMessages(history.current),
+        );
+        setTurns((prev) => [
+          ...prev,
+          {
+            role: 'system',
+            content: sanitizeText(`resumed ${saved.messages.length} message(s) from ${saved.updatedAt.slice(0, 16).replace('T', ' ')}`),
+          },
+        ]);
+        return;
+      }
+      const diffMatch = /^\/diff(?:\s+(.*))?$/.exec(text);
+      if (diffMatch) {
+        const file = diffMatch[1]?.trim();
+        const args = file ? ['diff', '--', file] : ['diff', '--stat'];
+        const r = await runArgv(['git', ...args]);
+        let body = r.output.trim();
+        if (!body && !file) {
+          const st = await runArgv(['git', 'status', '--short']);
+          body = st.output.trim();
+        }
+        setTurns((prev) => [
+          ...prev,
+          { role: 'system', content: sanitizeText(body || '(working tree clean)') },
+        ]);
+        return;
+      }
+      const askMatch = /^\/ask-agy(?:\s+(.*))?$/.exec(text);
+      if (askMatch) {
+        const cli = 'agy';
+        const q = askMatch[1]?.trim() ?? '';
+        if (!q) {
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: 'usage: /ask-agy <question or planning task>' },
+          ]);
+          return;
+        }
+        busyRef.current = true;
+        setBusy(true);
+        setTurns((prev) => [...prev, { role: 'user', content: text }]);
+        try {
+          const reply = await askExternalCli(cli, q);
+          history.current.push(
+            { role: 'user', content: q },
+            { role: 'assistant', content: `[${cli}]\n${reply}` },
+          );
+          setTurns((prev) => [
+            ...prev,
+            { role: 'assistant', content: sanitizeText(`[${cli}]\n${reply}`) },
+          ]);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setTurns((prev) => [
+            ...prev,
+            { role: 'system', content: sanitizeText(`⚠ ${msg}`), error: true },
+          ]);
+        } finally {
+          busyRef.current = false;
+          setBusy(false);
+        }
+        return;
+      }
       // /plan <task>: read-only turn — the harness withholds every tool that
       // changes state, so the model can only explore and propose.
       const planMatch = /^\/plan(?:\s+(.*))?$/.exec(text);
@@ -921,6 +998,7 @@ export function App({
         if (currentSnapshotRef.current?.hasChanges()) {
           lastSnapshotRef.current = currentSnapshotRef.current;
         }
+        saveSession(process.cwd(), history.current);
         currentSnapshotRef.current = null;
         abortRef.current = null;
         busyRef.current = false;

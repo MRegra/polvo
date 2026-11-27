@@ -130,10 +130,12 @@ test('grep searches files with line numbers, glob filter, and ignores node_modul
   writeFileSync('src/b.md', 'port = 3000\n');
   writeFileSync('node_modules/pkg/c.ts', 'const port = 9999;\n');
 
-  const all = await run('grep', { pattern: 'port' });
+  const all = await run('grep', { pattern: 'PORT' });
   assert.match(all, /^src\/a\.ts:1: const port = 8137;$/m);
   assert.match(all, /^src\/b\.md:1: port = 3000$/m);
   assert.doesNotMatch(all, /node_modules/);
+
+  assert.match(await run('grep', { pattern: 'PORT', case_sensitive: true }), /no matches/);
 
   const onlyTs = await run('grep', { pattern: 'port', glob: '*.ts' });
   assert.match(onlyTs, /src\/a\.ts:1:/);

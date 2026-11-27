@@ -589,7 +589,7 @@ const grepTool: Tool = {
   schema: {
     name: 'grep',
     description:
-      'Search for a regex or literal text pattern across files in the project. Returns matching file:line: text lines (read-only, no shell).',
+      'Search for a regex or literal text pattern across files in the project (case-insensitive by default). Returns matching file:line: text lines (read-only, no shell).',
     parameters: {
       type: 'object',
       properties: {
@@ -604,6 +604,10 @@ const grepTool: Tool = {
         glob: {
           type: 'string',
           description: 'optional filename filter, e.g. "*.ts" or "*.mjs"',
+        },
+        case_sensitive: {
+          type: 'boolean',
+          description: 'match case exactly (default false)',
         },
       },
       required: ['pattern'],
@@ -620,11 +624,12 @@ const grepTool: Tool = {
       typeof args.glob === 'string' && args.glob.trim() !== ''
         ? globToRegex(args.glob.trim())
         : null;
+    const flags = args.case_sensitive === true ? '' : 'i';
     let re: RegExp;
     try {
-      re = new RegExp(args.pattern);
+      re = new RegExp(args.pattern, flags);
     } catch {
-      re = new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      re = new RegExp(args.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
     }
 
     const root = await realpath(process.cwd());

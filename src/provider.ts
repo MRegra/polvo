@@ -103,8 +103,8 @@ function toOllama(m: Message): OllamaMessage {
   return msg;
 }
 
-const DEFAULT_NUM_PREDICT = 4096;
-const IDLE_TIMEOUT_MS = 180_000;
+const DEFAULT_NUM_PREDICT = 2048;
+const IDLE_TIMEOUT_MS = 300_000;
 
 /**
  * Some local models (e.g. Qwen3-Coder) occasionally emit XML-style tool calls

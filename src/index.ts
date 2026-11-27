@@ -46,7 +46,10 @@ project file (.polvo.json, all optional):
 while running:
   /manual, /help     show built-in manual
   /plan <task>       read-only: the model explores and proposes a plan
+  /ask-agy <prompt>  ask Antigravity CLI (read-only) and add reply to context
+  /diff [file]       show git diff (--stat or for one file)
   /undo              revert all file changes from the last turn
+  /resume            restore the last saved session for this directory
   /compact           compact context window on demand
   /status, /clear    show session status / clear history
   /exit, /quit       leave   ·   Ctrl-C also quits`;
@@ -173,6 +176,7 @@ if (positionals[0] === 'run') {
   });
   const controller = new AbortController();
   process.once('SIGINT', () => controller.abort());
+  process.once('SIGTERM', () => controller.abort());
   const result = await runHeadless(runProvider, runConfig, prompt, {
     yes: values.yes === true,
     signal: controller.signal,
