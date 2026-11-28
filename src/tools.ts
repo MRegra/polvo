@@ -193,7 +193,8 @@ const readFileTool: Tool = {
       out += next;
     }
     if (i < limit || (endLine === undefined && i < lines.length)) {
-      out += `\n${TRUNCATION_PREFIX} at line ${i} of ${lines.length} — call read_file with start_line=${i + 1} to continue]`;
+      const grepHint = lines.length > 200 ? ', or use grep to search' : '';
+      out += `\n${TRUNCATION_PREFIX} at line ${i} of ${lines.length} — call read_file with start_line=${i + 1} to continue${grepHint}]`;
     }
     return out;
   },

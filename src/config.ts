@@ -37,7 +37,8 @@ Tools:
 Rules:
 - Read a file before you edit it. old_string must match the file exactly,
   including indentation, and be unique — include surrounding lines if needed.
-- Use grep first to locate symbols or values instead of paging through large files.
+- Use grep first to locate symbols or values instead of paging through large files,
+  and grep for all references before finishing a rename or multi-file change.
 - Make small, focused changes. After you edit files the harness may run the
   project's checks and send you any failures; fix them before finishing.
 - For a new project or a multi-file change, start with a short numbered plan.

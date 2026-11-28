@@ -23,13 +23,12 @@ export function extractSymbols(source: string): string[] {
   const names: string[] = [];
   const seen = new Set<string>();
   const add = (name: string | undefined): void => {
-    if (!name || seen.has(name) || names.length >= MAX_SYMBOLS_PER_FILE) return;
+    if (!name || seen.has(name)) return;
     seen.add(name);
     names.push(name);
   };
 
   for (const raw of source.split('\n')) {
-    if (names.length >= MAX_SYMBOLS_PER_FILE) break;
     const line = raw.trimEnd();
     const exp = /^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|interface|type|enum)\s+([A-Za-z_$][\w$]*)/.exec(line);
     if (exp) {
@@ -39,7 +38,9 @@ export function extractSymbols(source: string): string[] {
     const top = /^(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)/.exec(line);
     if (top) add(top[1]);
   }
-  return names;
+  if (names.length <= MAX_SYMBOLS_PER_FILE) return names;
+  const half = Math.floor(MAX_SYMBOLS_PER_FILE / 2);
+  return [...names.slice(0, half), '…', ...names.slice(-half)];
 }
 
 /**

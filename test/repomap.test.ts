@@ -14,6 +14,10 @@ test('extractSymbols captures exported and top-level symbols', () => {
     'class Store {}',
   ].join('\n');
   assert.deepEqual(extractSymbols(src), ['loadUser', 'PORT', 'Config', 'helper', 'Store']);
+
+  const many = Array.from({ length: 20 }, (_, i) => `export function fn${i}() {}`).join('\n');
+  const syms = extractSymbols(many);
+  assert.ok(syms.includes('fn0') && syms.includes('fn19') && syms.includes('…'));
 });
 
 test('buildRepoMap lists files with symbols, skips ignored dirs, and caps length', () => {
